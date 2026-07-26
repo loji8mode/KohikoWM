@@ -1,0 +1,90 @@
+#include "Command.h"
+
+#include "Utils.h"
+
+#include <sstream>
+
+namespace Kohiko
+{
+
+Command Command::Parse(const std::string& text)
+{
+    Command command;
+
+    std::istringstream stream(Utils::Trim(text));
+
+    std::string action;
+    stream >> action;
+    action = Utils::Lower(action);
+
+    if (action.empty())
+        return command;
+
+    if (action == "exec")
+    {
+        command.type = CommandType::Exec;
+
+        std::string rest;
+        std::getline(stream, rest);
+        command.stringArg = Utils::Trim(rest);
+    }
+    else if (action == "close" || action == "kill")
+    {
+        command.type = CommandType::Close;
+    }
+    else if (action == "toggle_floating" || action == "togglefloating")
+    {
+        command.type = CommandType::ToggleFloating;
+    }
+    else if (action == "fullscreen" || action == "togglefullscreen")
+    {
+        command.type = CommandType::ToggleFullscreen;
+    }
+    else if (action == "scratchpad_toggle" || action == "scratchpad")
+    {
+        command.type = CommandType::ScratchpadToggle;
+    }
+    else if (action == "workspace")
+    {
+        command.type = CommandType::Workspace;
+        stream >> command.intArg;
+    }
+    else if (action == "movetoworkspace")
+    {
+        command.type = CommandType::MoveToWorkspace;
+        stream >> command.intArg;
+    }
+    else if (action == "focus")
+    {
+        command.type = CommandType::FocusDirection;
+
+        std::string dir;
+        stream >> dir;
+        dir = Utils::Lower(dir);
+
+        if (dir == "left")       command.directionArg = Direction::Left;
+        else if (dir == "right") command.directionArg = Direction::Right;
+        else if (dir == "up")    command.directionArg = Direction::Up;
+        else if (dir == "down")  command.directionArg = Direction::Down;
+    }
+    else if (action == "rotate")
+    {
+        command.type = CommandType::Rotate;
+    }
+    else if (action == "flip")
+    {
+        command.type = CommandType::Flip;
+    }
+    else if (action == "reload")
+    {
+        command.type = CommandType::Reload;
+    }
+    else if (action == "quit" || action == "exit")
+    {
+        command.type = CommandType::Quit;
+    }
+
+    return command;
+}
+
+}
