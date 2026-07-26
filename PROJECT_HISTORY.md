@@ -254,21 +254,67 @@ single-user desktop-session scope largely complete as of this release.
 
 --------------------------------------------------------------------------
 
+## Phase 8 — Configuration GUI (0.17.0)
+
+**Versions:** 0.17.0
+
+**Goals:**
+Deliver the configuration GUI flagged as "Planned" in the previous
+release, built directly on top of the `ConfigSchema` metadata registry
+that had been kept dormant and in sync with every new setting since it
+was introduced.
+
+**Major developments:**
+- Kohiko Settings (`kohiko-settings`): a native settings GUI shipped as
+  its own standalone application, not part of the `kohiko` process,
+  installed automatically alongside `kohiko`/`kohikoctl` with its own
+  `.desktop` entry and icon. It presents every setting from
+  `ConfigSchema` grouped by category and sub-heading, with search, a
+  per-setting info panel, inline validation, and Apply/Save/Reset to
+  Default.
+- `ConfigWriter`, a dedicated write path that edits `kohiko.conf`'s
+  existing lines, comments, and ordering in place, so hand-editing the
+  config file remains fully supported alongside the GUI rather than
+  being superseded by it.
+- `lockscreen.after` (`never`/`manual`/`suspend`/`always`), replacing
+  the previous plain on/off suspend-lock toggle with finer-grained
+  control over when the lock screen engages automatically, plus clock/
+  date/hostname/username display options and a best-effort secure wipe
+  of the typed password from memory after use.
+
+**Lessons visible from the repository:**
+This release directly follows through on the previous release's own
+stated plan rather than introducing an unrelated feature, and does so
+by finishing work (`ConfigSchema`) that had been deliberately kept
+current release-over-release specifically so this GUI could be built
+without a separate audit pass first. The GUI was also kept
+architecturally separate from the window manager process itself
+(a distinct binary, built from a small shared subset of source files)
+rather than folded into `kohiko` directly, consistent with the
+project's general preference for keeping the core WM process narrowly
+scoped.
+
+--------------------------------------------------------------------------
+
 ## Current Direction
 
-As of 0.16.0, Kohiko presents itself as a largely self-contained X11
+As of 0.17.0, Kohiko presents itself as a largely self-contained X11
 tiling window manager and minimal desktop session: its own bar, native
 launcher and notepad, native lock screen, power menu, session restore,
-and multi-monitor support, with a deliberately small and shrinking set
-of external dependencies (Xlib, optionally XRandr, Imlib2, Xft/
-fontconfig, and now libpam — GTK3 was removed in 0.15.0).
+multi-monitor support, and now a native settings GUI, with a
+deliberately small and shrinking set of external dependencies (Xlib,
+optionally XRandr, Imlib2, Xft/fontconfig, and libpam — GTK3 was
+removed in 0.15.0).
 
-The explicit "Planned" section in the 0.16.0 README, together with the
-dormant `ConfigSchema` registry introduced in the same release, points
-toward a future graphical configuration tool as the next major
-direction, built without changing the existing plain-text `key=value`
-configuration format. The "Intentionally unsupported" section in the
-same release (a deliberately single-slot scratchpad, an intentionally
-minimal notepad, no bound floating-window move) indicates the project
-is also actively choosing not to expand in certain directions, favoring
-a bounded, considered feature set over open-ended growth.
+The 0.17.0 README's "Planned" section no longer lists a configuration
+GUI at all, since this release builds it; the items remaining there are
+narrower refinements to what already exists (click-to-position text
+caret in Kohiko Settings, structured editors for window/monitor rules
+in place of raw-syntax text blocks, and idle-timeout locking), rather
+than a new major feature area. This suggests the project's next
+direction is continued refinement of the surface it has already built
+out, rather than expansion into new functionality — consistent with
+the "Intentionally unsupported" section (a deliberately single-slot
+scratchpad, an intentionally minimal notepad, no bound floating-window
+move) that indicates the project is deliberately bounding its own
+scope rather than growing it indefinitely.

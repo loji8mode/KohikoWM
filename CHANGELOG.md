@@ -1,26 +1,24 @@
 # Changelog
 
-## Version 0.16.0
+## Version 0.17.0
 
 Release date: 2026-07-26
 
 ### Added
-- Native lock screen (`Super+Shift+L`, `kohikoctl dispatch lock`, or automatically before Suspend): a full-screen, per-monitor overlay with a hidden-input password field, authenticated via PAM (new `Authenticator.h`/`.cpp`, using a `pam/kohiko` service file that must be installed as `/etc/pam.d/kohiko`) and implemented with a real keyboard/pointer grab so Kohiko's own global hotkeys and any client attempting to steal focus cannot receive input while locked. If the current account has no password configured, locking unlocks immediately (detected by attempting authentication with an empty password). Configurable via `lockscreen.*` keys (colors, optional background image and logo, font, and `lockscreen.lock_on_suspend`).
-- Power menu: every bar gets a `[Power]` button opening a popup with Shutdown/Restart/Suspend, each running a configurable shell command (`power.shutdown_command`/`_restart_command`/`_suspend_command`, defaulting to `systemctl poweroff`/`reboot`/`suspend`).
-- Session restore (`SessionStore.h`/`.cpp`): every managed window's workspace, tiled/floating state, floating geometry, monitor, and fullscreen state are saved on shutdown (including on `SIGTERM`/`SIGINT`, not just a clean `kohikoctl quit`) and reapplied on the next startup, keyed by X11 window ID. `session.restore_priority` (`config` or `session`) decides whether a conflicting `windowrule=` or the saved session wins for a given window.
-- Adoption of already-mapped windows at startup (`WindowManager::AdoptExistingWindows()`): restarting Kohiko, or starting it into a session where other windows are already open, now manages every pre-existing top-level window exactly as if it had just opened (tiled or floated per the same window rules), skipping override-redirect windows and dock-type panels.
-- `ConfigSchema.h`/`.cpp`: a metadata registry (category, type, default, description, allowed values) describing every config setting, intended as groundwork for a possible future configuration GUI. Not read by anything at runtime in this release.
-- Notepad: `Ctrl+Backspace`/`Ctrl+Delete` for whole-word deletion; the caret is now drawn as its own overlay rather than an inline character, so it no longer reflows the line or disappears depending on font.
-- The Launcher and Notepad now open centered on whichever monitor currently has the mouse cursor, falling back to the focused monitor and then the primary monitor if the cursor is outside every monitor.
+- Kohiko Settings (`kohiko-settings`): a native configuration GUI, built as its own standalone application (not part of the `kohiko` process) and installed automatically alongside `kohiko`/`kohikoctl`, with its own `.desktop` entry (`desktop/kohiko-settings.desktop`) and icon (`assets/icons/kohiko-settings.svg`) so it's discoverable through the launcher or any standards-compliant menu. It renders every setting described by `ConfigSchema` (previously dormant scaffolding, now actually used) grouped into a category sidebar with sub-headings, offers a search box filtering by key/label/description/group, an (i) info icon per setting showing its description/default/allowed values, inline validation of typed values (numbers, colors, percentages, and rule/keybinding syntax), and Apply/Save/Reset to Default actions.
+- `ConfigWriter` (`include/ConfigWriter.h`/`.cpp`): the write path Kohiko Settings uses to save changes back into `kohiko.conf`, editing existing lines, comments, and ordering in place rather than regenerating the file, so hand-editing the config remains fully supported alongside the GUI. A new key with no existing line is appended under a `# --- Added by Kohiko Settings ---` marker instead of being inserted elsewhere in the file.
+- `lockscreen.after` config key (`never`/`manual`/`suspend`/`always`), replacing the previous plain on/off `lockscreen.lock_on_suspend` toggle: `never` disables locking entirely, including the manual lock command; `manual` allows locking on demand only; `suspend` (the default) also locks automatically before Suspend; `always` additionally locks once at Kohiko startup.
+- Lock screen clock and date display (`lockscreen.show_clock`, `show_date`, `clock_format`, `date_format`), and optional hostname/username display above the password field (`lockscreen.show_hostname`, `show_username`).
+- `Utils::SecureErase()`: overwrites a string's buffer with zeros before clearing it; used by the lock screen to wipe the typed password from memory immediately after every authentication attempt (successful, failed, or cancelled via `Escape`), as a best-effort mitigation beyond what a plain `clear()` provides.
 
 ### Changed
-- Default config: `auto_start_programs` reduced to `flameshot`; `workspace1=`/`workspace2=`/`workspace3=` (commented out since 0.14.1) are active again, now launching `zen-browser`, `discord`/`telegram-desktop`, and `steam` respectively.
-- README's "Known limitations" section restructured into three sections: "Done" (implemented feature summary), "Planned" (a configuration GUI, backed by `ConfigSchema`), and "Intentionally unsupported" (design decisions not expected to change, such as the single-slot scratchpad and minimal notepad).
-- Build files updated to require libpam; `scripts/install-arch.sh` and the README's build instructions updated accordingly, including installing the new `pam/kohiko` service file.
+- `ConfigSchema::ValueType::Bool` renamed to `Boolean`.
+- Default config: `session.restore_priority` default changed from `session` back to `config`; `workspace1=`/`workspace2=`/`workspace3=` example autostart lines commented out again; `auto_start_programs` default restored to `Telegram discord zen-browser flameshot`.
+- `scripts/install-arch.sh` updated to note that `kohiko-settings` is installed automatically alongside `kohiko`, with no additional dependency.
 
 ### Removed
-- The "Kohiko doesn't adopt windows that were already mapped by a previous window manager" and "the launcher and notepad are single, global panels, always on the primary monitor" known limitations were removed, both resolved by this release.
+- `lockscreen.lock_on_suspend` config key, replaced by `lockscreen.after` with no automatic migration; a config file still setting `lockscreen.lock_on_suspend` has no effect under this release.
 
 ### Notes
-- `Authenticator::Authenticate()` runs the actual PAM conversation in a short-lived forked child process rather than in Kohiko's own process, after testing found that `pam_authenticate()`'s own internal fork (via `unix_chkpwd`) could hang when run directly inside a larger multi-threaded process.
-- Locking the screen before issuing the configured suspend command (rather than trying to detect resume afterward) means the lock screen is already active the instant the machine wakes, without needing any `logind`/DBus sleep-signal integration.
+- `kohiko-settings` is built from a deliberately small, shared subset of the project's own source files (`Config`, `ConfigSchema`, `Utils`, `Font`, plus its own `SettingsWindow`/`ConfigWriter`) rather than linking against the full `kohiko` binary, so it carries none of the window-manager-only code (BSP layout, EWMH handling, XRandr monitor detection, and so on) and needs nothing beyond the X11/Xft dependencies `kohiko` itself already requires.
+- The four repeatable config directives (`bind=`, `exec.<name>=`, `windowrule=`, `monitor=`) are edited in Kohiko Settings as raw, one-line-per-entry text blocks rather than individually-typed fields; `workspace<N>=` autostart is the exception, shown as one plain text field per workspace since each is a distinct key.

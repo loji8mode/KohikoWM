@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Kohiko Settings
+GenericName=Settings
+Comment=Configure Kohiko - appearance, keybindings, the lock screen, and more
+Exec=kohiko-settings
+Icon=kohiko-settings
+Categories=Settings;DesktopSettings;
+StartupWMClass=kohiko-settings
+Terminal=false
+NoDisplay=false

@@ -34,6 +34,15 @@ endif()
 
 file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 
+# SettingsWindow.cpp/ConfigWriter.cpp exist only for kohiko-settings,
+# its own separate binary/process (see include/SettingsWindow.h's own
+# header comment for why) - excluded here so `kohiko` itself stays
+# free of GUI code it never runs, per "keep the WM lightweight".
+list(REMOVE_ITEM KOHIKO_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/SettingsWindow.cpp
+    ${CMAKE_SOURCE_DIR}/src/ConfigWriter.cpp
+)
+
 add_executable(kohiko ${KOHIKO_SOURCES})
 target_include_directories(kohiko PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
 target_link_libraries(kohiko PRIVATE ${X11_LIBRARIES} PkgConfig::Xft PkgConfig::Imlib2 ${PAM_LIBRARY})
@@ -51,6 +60,29 @@ endif()
 add_executable(kohikoctl tools/kohikoctl.cpp src/IpcPath.cpp)
 target_include_directories(kohikoctl PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_options(kohikoctl PRIVATE -Wall -Wextra)
+
+# --- kohiko-settings: Kohiko Settings' GUI ---------------------------------------
+#
+# A completely ordinary X11 client application, not part of the WM
+# process at all - see include/SettingsWindow.h. Only needs
+# X11/Xft/fontconfig, all of which `kohiko` itself already requires
+# above, so this adds no new dependency to the project as a whole.
+# Installing Kohiko always installs this alongside it (see this
+# file's own install() below) - it's part of Kohiko itself, not a
+# separate package.
+
+add_executable(kohiko-settings
+    tools/kohiko-settings.cpp
+    src/SettingsWindow.cpp
+    src/ConfigWriter.cpp
+    src/ConfigSchema.cpp
+    src/Config.cpp
+    src/Utils.cpp
+    src/Font.cpp
+)
+target_include_directories(kohiko-settings PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
+target_link_libraries(kohiko-settings PRIVATE ${X11_LIBRARIES} PkgConfig::Xft)
+target_compile_options(kohiko-settings PRIVATE -Wall -Wextra)
 
 # --- tests ------------------------------------------------------------------------
 
@@ -108,5 +140,12 @@ add_test(NAME MonitorManager COMMAND test_monitormanager)
 
 # --- install ------------------------------------------------------------------------
 
-install(TARGETS kohiko kohikoctl RUNTIME DESTINATION bin)
+install(TARGETS kohiko kohikoctl kohiko-settings RUNTIME DESTINATION bin)
 install(FILES config/default.conf DESTINATION share/kohiko)
+install(FILES desktop/kohiko-settings.desktop DESTINATION share/applications)
+install(FILES assets/icons/kohiko-settings.svg DESTINATION share/icons/hicolor/scalable/apps)
+# See the Makefile's own install: target for why this second copy,
+# at an absolute (not ${CMAKE_INSTALL_PREFIX}-relative) path, exists -
+# IconResolver's guaranteed-checked pixmaps fallback, working around
+# its theme search only reading one base directory per theme.
+install(FILES assets/icons/kohiko-settings.svg DESTINATION /usr/share/pixmaps)

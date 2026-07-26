@@ -159,6 +159,18 @@ private:
     unsigned long m_fieldPixel = 0;
     unsigned long m_errorPixel = 0;
 
+    // See Configure() - lockscreen.show_clock/show_date/show_hostname/
+    // show_username and lockscreen.clock_format/date_format. Hostname
+    // is resolved once, in Configure() (it never changes at runtime),
+    // rather than on every Redraw().
+    bool m_showClock = true;
+    bool m_showDate = true;
+    bool m_showHostname = false;
+    bool m_showUsername = true;
+    std::string m_clockFormat;
+    std::string m_dateFormat;
+    std::string m_hostname;
+
 };
 
 }

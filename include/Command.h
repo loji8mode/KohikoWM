@@ -35,10 +35,10 @@ enum class CommandType
     LauncherToggle,
     NotepadToggle,
 
-    // `lock` - shows the native lock screen immediately. See
-    // LockScreen.h; also triggered automatically before Suspend
-    // (see PowerMenu's suspend callback) if lockscreen.lock_on_suspend
-    // is enabled.
+    // `lock` - shows the native lock screen immediately, unless
+    // lockscreen.after=never. See LockScreen.h; also triggered
+    // automatically before Suspend (see PowerMenu's suspend callback)
+    // when lockscreen.after is "suspend" or "always".
     Lock,
 
     // Multi-monitor: `focusmonitor <left|right|up|down|N>` and

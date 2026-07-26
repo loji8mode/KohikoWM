@@ -66,4 +66,18 @@ std::size_t Utf8ClampToBoundary(
     std::size_t pos
 );
 
+// Overwrites `value`'s current buffer with zeros before clearing it,
+// so a plaintext password doesn't just sit in still-allocated heap
+// memory as ordinary std::string::clear() would leave it (clear()
+// only resets size(), it doesn't touch the bytes themselves) -
+// used by LockScreen right after every use of the typed password.
+// This can only ever be a best-effort mitigation, not a guarantee:
+// std::string's short-string optimization, any prior reallocation
+// while the password was being typed, and swap space are all outside
+// what a single call like this can reach - see LockScreen.cpp's own
+// comment at its call sites for what this does and doesn't cover.
+void SecureErase(
+    std::string& value
+);
+
 }

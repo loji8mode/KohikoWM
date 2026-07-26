@@ -27,6 +27,7 @@ a full compositor.
 - [Building](#building)
 - [Running it](#running-it)
 - [Configuration](#configuration)
+- [Kohiko Settings](#kohiko-settings)
 - [Window rules](#window-rules)
 - [Multi-monitor](#multi-monitor)
 - [Autostart](#autostart)
@@ -38,6 +39,7 @@ a full compositor.
 - [The notepad (Super+N)](#the-notepad-supern)
 - [The power menu](#the-power-menu)
 - [Native lock screen](#native-lock-screen)
+- [Suspend integration](#suspend-integration)
 - [Fonts and languages](#fonts-and-languages)
 - [kohikoctl / IPC](#kohikoctl--ipc)
 - [Architecture](#architecture)
@@ -80,17 +82,22 @@ Two build systems are provided; pick whichever you'd rather have installed.
 **Plain `make`** (no cmake required):
 
 ```sh
-make -j$(nproc)          # -> ./kohiko, ./kohikoctl
+make -j$(nproc)          # -> ./kohiko, ./kohikoctl, ./kohiko-settings
 make test                 # unit tests for the BSP tree (no X server needed)
 make test-monitors        # MonitorManager/XRandr tests (needs a real X server - skips gracefully without one)
-sudo make install          # installs to /usr/local
+sudo make install          # installs to /usr/local, incl. Kohiko Settings' .desktop entry + icon
 ```
 
 **CMake:**
 
 ```sh
-scripts/build.sh           # -> build/kohiko, build/kohikoctl
+scripts/build.sh           # -> build/kohiko, build/kohikoctl, build/kohiko-settings
 ```
+
+`kohiko-settings` (see [Kohiko Settings](#kohiko-settings)) is Kohiko's
+own settings GUI - part of this same repository and build, needing
+nothing beyond the X11/Xft already listed above, not a separate project
+or package.
 
 If `libxrandr-dev` is present, both build systems automatically compile in
 XRandr-based monitor detection (`KOHIKO_HAVE_XRANDR`); if it isn't, Kohiko
@@ -196,31 +203,88 @@ windowrule=tile class:tlauncher
 monitor=HDMI-1,workspace=1              # see Multi-monitor below
 ```
 
-### Preparing for a future config GUI
+### Kohiko Settings
 
-There's no configuration GUI yet, and building one isn't planned for right
-now - but `include/ConfigSchema.h` exists specifically so one can be added
-later without a separate audit pass over every setting first. It's a
-small, independent metadata registry (category, type, default, a human
-description, and allowed values for anything enum-like) describing what a
-GUI would need to render categorized, searchable settings with an inline
-"what does this do" info icon per option - entirely separate from
-`Config` itself, which stays exactly the simple untyped key=value store
-it's always been and doesn't reference `ConfigSchema` at all.
+A native settings GUI ships as part of Kohiko itself: `kohiko-settings`,
+built from this same repository (`make`/`sudo make install` or the CMake
+equivalent build and install it right alongside `kohiko`/`kohikoctl` - see
+[Building](#building)), with no extra dependency beyond what Kohiko
+itself already needs (plain X11/Xft - no GTK/Qt here either, same as
+every other Kohiko-drawn window). Installing Kohiko always installs
+Kohiko Settings; there's no separate package or opt-in step.
 
-The convention going forward: any new setting added to Kohiko should get
-a matching `ConfigOption` entry in `ConfigSchema.cpp` alongside its
-`config/default.conf` documentation, not instead of it. `ConfigSchema`
-currently isn't read by anything at runtime - it's dormant scaffolding,
-not a feature - but keeping it in sync as new settings appear is what
-actually makes a future GUI buildable straight from this file rather than
-needing to reverse-engineer one from every comment in `default.conf`.
+Unlike the bar/launcher/notepad/power menu/lock screen - all windows the
+`kohiko` process draws for itself - `kohiko-settings` is a completely
+ordinary, separate application, run and window-managed exactly like any
+other program. It's discoverable the same way too: `sudo make
+install`/CMake's `install()` drop a standard `.desktop` entry
+(`desktop/kohiko-settings.desktop`) and icon
+(`assets/icons/kohiko-settings.svg`) into the usual XDG locations, so it
+shows up in Kohiko's own launcher (`Super+D`, type "Kohiko Settings") or
+any other standards-compliant launcher/menu through completely ordinary
+desktop-file indexing - nothing is hardcoded into `Launcher.cpp`/
+`AppIndex.cpp` to make that happen. You can also just run
+`kohiko-settings` directly from a terminal.
 
-Reload after editing without restarting: `kohikoctl reload` (also bound to
-`Super+Shift+C` by default). `auto_start_programs` and `workspace<N>=` are
-the one exception - both only ever run right after Kohiko itself starts,
-never on reload, so reloading the config doesn't relaunch every autostart
-program.
+What it gives you, on top of hand-editing `kohiko.conf`:
+
+- A **category sidebar** (General, Appearance, Launcher, Bar, Input,
+  Monitors, Workspaces, Window Rules, Power, Notepad, Scratchpad,
+  Developer, Lock Screen), with settings further **grouped under
+  sub-headings** within a category (e.g. Appearance's Layout/Colors/Text)
+  instead of one long flat list.
+- **Search** (top of the window) that filters across every category at
+  once by key, label, description, or group - clicking a category again
+  clears it.
+- An **(i) info icon** beside every setting; click it to expand a short
+  panel with its description, default value, allowed values (for
+  anything enum-like), and any recommendation, then click again to
+  collapse it.
+- **Inline validation** - a number field that doesn't parse, a color
+  that isn't `0xRRGGBB`, a percentage missing its `%`, or a window
+  rule/monitor rule/keybinding/named-command line that doesn't match its
+  expected syntax gets a red outline and a short error message right
+  there, rather than silently writing something Kohiko wouldn't
+  understand.
+- **Apply**, **Save**, and **Reset to Default** at the bottom. Apply
+  writes every valid, changed setting to `kohiko.conf` and asks a
+  currently-running Kohiko to pick it up immediately (`kohikoctl
+  reload`), without closing the window; Save does the same and then
+  closes; Reset to Default resets whatever's currently in view (the
+  selected category, or the current search results) back to its shipped
+  default - nothing is written to disk until you Apply or Save
+  afterward.
+
+The four repeatable directives - `bind=`, `exec.<name>=`, `windowrule=`,
+`monitor=` (see [Window rules](#window-rules) and
+[Multi-monitor](#multi-monitor)) - are each edited as their own small
+block of raw config syntax (one entry per line, exactly like you'd write
+it in the file) rather than pretending every repeated line is an
+individually-typed field: `windowrule=` lives under Window Rules,
+`monitor=` under Monitors, `bind=` under Input's "Keybindings" group, and
+`exec.<name>=` under Developer. `workspace<N>=` autostart, on the other
+hand, *is* a plain per-workspace text field (one per workspace, right
+under `workspace.count` in the Workspaces category) since each is
+genuinely its own distinct key rather than one repeated one.
+
+Throughout, **`kohiko.conf` remains the actual source of truth**: Apply/
+Save edit the file's existing lines in place - preserving every comment,
+blank line, and setting you haven't touched through the GUI at all -
+rather than regenerating it, so hand-editing the same file before, after,
+or interleaved with using Kohiko Settings is always fully supported. A
+setting the GUI has never touched keeps its exact original text (`yes`
+stays `yes` rather than being silently rewritten to `true` the next time
+you click Apply, for instance); a genuinely new key Kohiko Settings adds
+that didn't already have an active line gets appended under a clearly
+marked `# --- Added by Kohiko Settings ---` section at the end of the
+file instead of guessing where else it might belong.
+
+Reload after editing `kohiko.conf` by hand without restarting: `kohikoctl
+reload` (also bound to `Super+Shift+C` by default, and what Kohiko
+Settings' own Apply/Save do automatically). `auto_start_programs` and
+`workspace<N>=` are the one exception - both only ever run right after
+Kohiko itself starts, never on reload, so reloading the config doesn't
+relaunch every autostart program.
 
 ## Window rules
 
@@ -645,15 +709,17 @@ command configured via `power.shutdown_command`/`power.restart_command`/
 `power.suspend_command` (`systemctl poweroff`/`reboot`/`suspend` by
 default; see `config/default.conf`). Click a row to run it, or click
 anywhere else / press `Escape` to dismiss the menu without running
-anything.
+anything. Whether Suspend locks the screen first is governed by
+`lockscreen.after` - see [Suspend integration](#suspend-integration).
 
 ## Native lock screen
 
 `Super+Shift+L`, `kohikoctl dispatch lock`, or automatically right before
-Suspend (see below) locks the screen: full-screen on every monitor, a
-password field with hidden input, `Escape` clears whatever's typed
-(it never unlocks), `Enter` authenticates. No dependency on `i3lock`,
-`betterlockscreen`, or any other external locker.
+Suspend (depending on `lockscreen.after` - see below) locks the screen:
+full-screen on every monitor, a password field with hidden input,
+`Escape` clears whatever's typed (it never unlocks), `Enter`
+authenticates. No dependency on `i3lock`, `betterlockscreen`, or any
+other external locker.
 
 Authentication goes through PAM, using a service named `kohiko` - install
 `pam/kohiko` from this repo as `/etc/pam.d/kohiko` first (see
@@ -678,21 +744,50 @@ away with. Stacking alone wouldn't stop Kohiko's own global hotkeys
 or a misbehaving client that calls `XSetInputFocus` on itself directly
 from stealing keystrokes - including the password itself.
 
-Suspend integration doesn't depend on `logind`/DBus sleep signals: since
-Kohiko itself is what spawns `power.suspend_command` (see
+Whatever's typed is wiped from memory (overwritten with zeros, not just
+`.clear()`'d - see `Utils::SecureErase`) the moment it's no longer
+needed: right after a successful authentication, right after a failed
+one, and on `Escape`. This is a best-effort mitigation, not a guarantee -
+it can only ever reach Kohiko's own copy of the string, not anything a
+prior reallocation or swap may already have copied elsewhere - but it
+means a plaintext password doesn't just sit in Kohiko's own heap for the
+rest of the session the way a plain `clear()` would leave it.
+
+## Suspend integration
+
+`lockscreen.after` controls when the lock screen engages automatically:
+
+- `never` - not even the manual lock command/keybind will lock (a
+  deliberate full opt-out - e.g. a trusted single-user machine that
+  doesn't want a lock screen at all).
+- `manual` - only locks when you ask it to (`Super+Shift+L`/`kohikoctl
+  dispatch lock`); Suspend does not lock automatically.
+- `suspend` (the default) - also locks automatically right before
+  Suspend.
+- `always` - also locks once at Kohiko startup, on top of `suspend`'s
+  automatic-before-Suspend behavior - so a freshly started (or just
+  restarted) session is never reachable unlocked either.
+
+Suspend integration itself doesn't depend on `logind`/DBus sleep
+signals: since Kohiko itself is what spawns `power.suspend_command` (see
 [The power menu](#the-power-menu)), it locks the screen *before* issuing
-that command rather than trying to detect the resume afterward
-(`lockscreen.lock_on_suspend`, on by default). Suspending freezes the
-whole machine - X server, Kohiko, and every active grab included - and
-resumes it exactly as it was, so "lock right before suspending" and "the
-lock screen is already there the instant it wakes back up" end up being
-the same thing, with no separate wake-detection needed at all.
+that command rather than trying to detect the resume afterward. Suspending
+freezes the whole machine - X server, Kohiko, and every active grab
+included - and resumes it exactly as it was, so "lock right before
+suspending" and "the lock screen is already there the instant it wakes
+back up" end up being the same thing, with no separate wake-detection
+needed at all. If the account has no password configured, the lock screen
+still briefly appears then unlocks immediately, same as any other time it
+locks - see above.
 
 Configurable via `lockscreen.*` in `config/default.conf`: background
 color, an optional background image (stretched to fill each monitor) and
 an optional logo (centered above the password field, drawn at a fixed
 size), foreground/field/error colors, and font (falls back to
-`general.font` if unset).
+`general.font` if unset); a clock and date (each independently toggled
+on/off, with their own `strftime()` format string); and independent
+toggles for showing the username and/or hostname above the password
+field (shown as `user@host` if both are on).
 
 **A security note, same as every other X11 screen locker's own
 documentation says of itself:** this locks the X *session* - it's exactly
@@ -781,6 +876,11 @@ Roughly the file layout the project was designed around, one responsibility each
 | `IPCServer` / `kohikoctl`  | The Unix-socket control protocol and its CLI client |
 | `Bar`                      | One instance per monitor - its own workspaces/active-highlight, a title (focused monitor only), scratchpad/notepad indicators, clock, transient notifications - plain Xlib text, no toolkit |
 | `MonitorManager` / `Monitor` / `MonitorRule` | XRandr detection and hotplug, one monitor's geometry/`WorkArea()`/active workspace, `monitor=` rule parsing - see [Multi-monitor](#multi-monitor) |
+| `PowerMenu`                | The bar's `[Power]` popup - exactly Shutdown/Restart/Suspend, see [The power menu](#the-power-menu) |
+| `LockScreen` / `Authenticator` | The native lock screen and its PAM authentication (run in a short-lived forked child, never inline in the main process) - see [Native lock screen](#native-lock-screen) |
+| `ConfigSchema`             | Metadata about `Config`'s keys (category/group/type/default/description/allowed values) - what Kohiko Settings actually renders from; `Config` itself doesn't reference this at all, see [Kohiko Settings](#kohiko-settings) |
+| `ConfigWriter`             | Kohiko Settings' write path back into `kohiko.conf` - edits existing lines in place rather than regenerating the file, see [Kohiko Settings](#kohiko-settings) |
+| `SettingsWindow`           | `kohiko-settings` itself - a separate ordinary application, not part of the `kohiko` process, see [Kohiko Settings](#kohiko-settings) |
 
 A `BSPNode`'s `Geometry()` is its raw tree-partition rect (no gaps - used
 for hit-testing and neighbor search because it tiles the workspace with no
@@ -854,18 +954,40 @@ into a tile it's already shown it won't render into correctly.
 - **A power menu on every bar** - shutdown/restart/suspend, nothing
   else - see [The power menu](#the-power-menu).
 - **A native lock screen** - PAM-authenticated, no `i3lock`/
-  `betterlockscreen` dependency, integrated with Suspend - see
-  [Native lock screen](#native-lock-screen).
+  `betterlockscreen` dependency, configurable clock/date/hostname/
+  username display, a `lockscreen.after` setting governing exactly when
+  it engages automatically (`never`/`manual`/`suspend`/`always`), and a
+  best-effort secure wipe of the typed password from memory right after
+  it's used - see [Native lock screen](#native-lock-screen) and
+  [Suspend integration](#suspend-integration).
+- **Kohiko Settings** (`kohiko-settings`) - a native configuration GUI,
+  installed automatically alongside `kohiko`/`kohikoctl` with its own
+  `.desktop` entry and icon: a category sidebar, settings grouped under
+  sub-headings, search, an (i) info icon per setting (description,
+  default, allowed values, recommendation), inline validation, and
+  Apply/Save/Reset to Default - editing `kohiko.conf`'s existing lines
+  in place rather than regenerating the file, so hand-editing the same
+  file remains fully supported alongside it. See
+  [Kohiko Settings](#kohiko-settings).
 
 ## Planned
 
-- **A configuration GUI** - categories, grouped settings, search, and a
-  per-setting info icon explaining what it does, its default, and its
-  valid values. Not built yet; `ConfigSchema` (see
-  [Preparing for a future config GUI](#preparing-for-a-future-config-gui))
-  is the groundwork for it - a metadata registry a GUI could read
-  straight from, kept separate from `Config` itself so none of this
-  changes how configuration actually loads or is read today.
+- **Click-to-position the text caret in Kohiko Settings.** Right now,
+  clicking a text field focuses it (caret at the end); moving the caret
+  anywhere else within it is keyboard-only (arrow keys/Home/End) -
+  functional, but not as immediate as clicking directly where you want
+  to type.
+- **Structured editors for window rules and monitor rules in Kohiko
+  Settings**, beyond the current raw-syntax text block (one
+  `windowrule=`/`monitor=` line per row, freely typed) - e.g. a
+  selector-type dropdown plus a plain text field per rule, rather than
+  needing to know the `class:`/`instance:`/`title:` syntax by hand even
+  inside the GUI.
+- **Idle-timeout locking** - `lockscreen.after=always` currently covers
+  "on Suspend" and "at startup"; a genuine idle-timeout trigger (lock
+  automatically after N minutes of no input, independent of Suspend)
+  isn't implemented yet, since it needs an idle-detection mechanism
+  Kohiko doesn't have any other use for today.
 
 ## Intentionally unsupported
 

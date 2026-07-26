@@ -64,6 +64,10 @@ make -j"$(nproc)"
 
 echo "==> Installing binaries (sudo make install)"
 sudo make install
+# This also installs kohiko-settings (Kohiko Settings' GUI) and its
+# .desktop entry/icon - see the Makefile's own install: target. No
+# extra dependency for it: it's plain X11/Xft, both already installed
+# above for kohiko itself.
 
 CONFIG_DIR="$HOME/.config/kohiko"
 CONFIG_FILE="$CONFIG_DIR/kohiko.conf"
@@ -103,3 +107,5 @@ fi
 echo
 echo "==> Done. Pick \"Kohiko\" from your display manager's session list at login,"
 echo "    or run 'startx' if you're using ~/.xinitrc directly."
+echo "    Once you're in: Super+D opens the launcher, and \"Kohiko Settings\" is"
+echo "    in there too - or run 'kohiko-settings' directly."

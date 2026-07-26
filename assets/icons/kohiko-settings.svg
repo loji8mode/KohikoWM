@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Kohiko Settings' application icon - a plain, flat gear, in the
+    same accent-blue-on-dark palette as the rest of Kohiko's default
+    theme (bar.active / general.border_color_active =~ #89b4fa on
+    #1e1e2e). Installed into the hicolor icon theme (see the
+    Makefile/CMakeLists.txt install rules) so both Kohiko's own
+    launcher and any other XDG-compliant one can find it by name
+    ("kohiko-settings", from the .desktop file's Icon= key) with no
+    special-casing anywhere.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <circle cx="24" cy="24" r="23" fill="#1e1e2e"/>
+
+  <g fill="#89b4fa">
+    <rect x="21.5" y="3"  width="5" height="8"  rx="1.5"/>
+    <rect x="21.5" y="37" width="5" height="8"  rx="1.5"/>
+    <rect x="3"  y="21.5" width="8" height="5" rx="1.5"/>
+    <rect x="37" y="21.5" width="8" height="5" rx="1.5"/>
+
+    <rect x="21.5" y="3"  width="5" height="8" rx="1.5" transform="rotate(45 24 24)"/>
+    <rect x="21.5" y="37" width="5" height="8" rx="1.5" transform="rotate(45 24 24)"/>
+    <rect x="3"  y="21.5" width="8" height="5" rx="1.5" transform="rotate(45 24 24)"/>
+    <rect x="37" y="21.5" width="8" height="5" rx="1.5" transform="rotate(45 24 24)"/>
+
+    <circle cx="24" cy="24" r="13"/>
+  </g>
+
+  <circle cx="24" cy="24" r="6.5" fill="#1e1e2e"/>
+</svg>

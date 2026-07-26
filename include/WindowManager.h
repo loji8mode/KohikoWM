@@ -227,6 +227,21 @@ private:
     // startup does.
     void AdoptExistingWindows();
 
+    // Interprets lockscreen.after (never/manual/suspend/always - see
+    // ConfigSchema and the README's "Suspend integration" section):
+    // whether the *manual* `lock` command (bind=/`kohikoctl dispatch
+    // lock`) is allowed to lock at all (false only for "never" - every
+    // other value still allows locking on demand, they only differ in
+    // what triggers it *automatically*), and separately, whether
+    // Suspend should lock automatically before it runs. "always" adds
+    // one more automatic trigger on top of "suspend": also locking
+    // once, right at startup/Initialize() - see that function's own
+    // call site - so a session freshly started (or resumed from a
+    // crash) never sits unlocked either.
+    bool LockScreenManualAllowed() const;
+    bool LockScreenAutoOnSuspend() const;
+    bool LockScreenAutoOnStartup() const;
+
     void Focus(WindowID id);
 
     // Focuses the front visible window on `monitor`'s active

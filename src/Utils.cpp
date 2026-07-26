@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 
 namespace Kohiko::Utils
 {
@@ -159,6 +160,27 @@ std::size_t Utf8ClampToBoundary(
         --pos;
 
     return pos;
+}
+
+void SecureErase(
+    std::string& value)
+{
+    // volatile so the optimizer can't reason "this store is dead,
+    // nothing reads `value` again before clear()/destruction" and
+    // drop it - the same reasoning explicit_bzero()/SecureZeroMemory()
+    // exist for on other platforms. Plain std::memset(value.data(), ...)
+    // followed immediately by clear() would be legal for the compiler
+    // to elide entirely under the as-if rule.
+    if (!value.empty())
+    {
+        volatile char* data = const_cast<volatile char*>(value.data());
+
+        for (std::size_t i = 0; i < value.size(); ++i)
+            data[i] = '\0';
+    }
+
+    value.clear();
+    value.shrink_to_fit(); // drop the (now-zeroed) buffer instead of leaving it allocated for reuse
 }
 
 }

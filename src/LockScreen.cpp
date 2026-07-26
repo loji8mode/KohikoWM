@@ -13,11 +13,39 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <pwd.h>
 #include <unistd.h>
 
 namespace Kohiko
 {
+
+namespace
+{
+
+// strftime() against the current local time - used for both
+// lockscreen.clock_format and lockscreen.date_format, which really
+// are just two independent strftime patterns rather than needing
+// separate clock/calendar logic of their own. Returns "" if the
+// formatted result wouldn't fit the buffer (an unreasonably long
+// pattern) rather than a truncated, possibly-misleading string.
+std::string FormatNow(
+    const std::string& pattern)
+{
+    if (pattern.empty())
+        return "";
+
+    std::time_t now = std::time(nullptr);
+    std::tm local{};
+    localtime_r(&now, &local);
+
+    char buffer[128];
+    std::size_t written = std::strftime(buffer, sizeof(buffer), pattern.c_str(), &local);
+
+    return written > 0 ? std::string(buffer, written) : "";
+}
+
+}
 
 LockScreen::LockScreen(
     XConnection& connection)
@@ -71,6 +99,27 @@ void LockScreen::Configure(
 
     m_backgroundImagePath = config.GetString("lockscreen.background_image", "");
     m_logoPath            = config.GetString("lockscreen.logo", "");
+
+    m_showClock    = config.GetBool("lockscreen.show_clock", true);
+    m_showDate     = config.GetBool("lockscreen.show_date", true);
+    m_showHostname = config.GetBool("lockscreen.show_hostname", false);
+    m_showUsername = config.GetBool("lockscreen.show_username", true);
+    m_clockFormat  = config.GetString("lockscreen.clock_format", "%H:%M");
+    m_dateFormat   = config.GetString("lockscreen.date_format", "%A, %B %d");
+
+    // Resolved once here rather than per-Redraw() - the local
+    // hostname doesn't change while Kohiko is running.
+    char hostnameBuffer[256];
+
+    if (gethostname(hostnameBuffer, sizeof(hostnameBuffer)) == 0)
+    {
+        hostnameBuffer[sizeof(hostnameBuffer) - 1] = '\0';
+        m_hostname = hostnameBuffer;
+    }
+    else
+    {
+        m_hostname.clear();
+    }
 
     std::string fontPattern = config.GetString(
         "lockscreen.font",
@@ -279,7 +328,7 @@ void LockScreen::Lock(
 
     m_connection.SetInputFocus(m_window);
 
-    m_typed.clear();
+    Utils::SecureErase(m_typed);
     m_showError = false;
     m_locked = true;
 
@@ -298,7 +347,12 @@ void LockScreen::Unlock()
 
     m_connection.UnmapWindow(m_window);
 
-    m_typed.clear();
+    // Wiped, not just cleared - see Utils::SecureErase's own comment
+    // for exactly what that does and doesn't guarantee. This is the
+    // "password memory is wiped immediately after authentication"
+    // requirement; the failed-attempt and Escape paths in
+    // HandleKeyPress() below do the same.
+    Utils::SecureErase(m_typed);
     m_showError = false;
     m_locked = false;
 }
@@ -371,7 +425,7 @@ void LockScreen::HandleKeyPress(
     switch (keysym)
     {
         case XK_Escape:
-            m_typed.clear();
+            Utils::SecureErase(m_typed);
             m_showError = false;
             break;
 
@@ -394,7 +448,7 @@ void LockScreen::HandleKeyPress(
                 return;
             }
 
-            m_typed.clear();
+            Utils::SecureErase(m_typed);
             m_showError = true;
             m_errorUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(1800);
             break;
@@ -418,11 +472,23 @@ void LockScreen::HandleKeyPress(
 
 void LockScreen::Tick()
 {
+    bool needsRedraw = false;
+
     if (m_showError && std::chrono::steady_clock::now() >= m_errorUntil)
     {
         m_showError = false;
-        Redraw();
+        needsRedraw = true;
     }
+
+    // Same reasoning as Bar::Redraw() being called every Tick() to
+    // keep its own clock current - Tick() runs roughly once a second
+    // while idle (see EventLoop's select() timeout), which is exactly
+    // the resolution lockscreen.clock_format needs.
+    if (m_locked && (m_showClock || m_showDate))
+        needsRedraw = true;
+
+    if (needsRedraw)
+        Redraw();
 }
 
 void LockScreen::Redraw()
@@ -460,6 +526,30 @@ void LockScreen::Redraw()
 
         int centerX = geo.CenterX();
         int centerY = geo.CenterY();
+
+        // Clock/date, if enabled - drawn well above the logo/field so
+        // neither ever overlaps regardless of which combination of
+        // logo/clock/date is turned on. Reuses the same font as
+        // everything else on this screen rather than loading a second,
+        // larger one - see this class's header comment on why that's
+        // an acceptable simplification for a deliberately plain lock
+        // screen rather than a full theming system.
+        int clockY = centerY - 200;
+        int dateY = clockY + m_font.Height() + 6;
+
+        if (m_showClock)
+        {
+            std::string clockText = FormatNow(m_clockFormat);
+            int clockWidth = m_font.TextWidth(clockText);
+            m_font.DrawString(m_xftDraw, centerX - clockWidth / 2, clockY, clockText, foreground.Get());
+        }
+
+        if (m_showDate)
+        {
+            std::string dateText = FormatNow(m_dateFormat);
+            int dateWidth = m_font.TextWidth(dateText);
+            m_font.DrawString(m_xftDraw, centerX - dateWidth / 2, dateY, dateText, foreground.Get());
+        }
 
         if (m_logoPixmap)
         {
@@ -507,7 +597,30 @@ void LockScreen::Redraw()
         int fieldBaseline = fieldY + fieldHeight / 2 + m_font.Ascent() / 2;
         m_font.DrawString(m_xftDraw, fieldX + 14, fieldBaseline, dots, foreground.Get());
 
-        std::string caption = m_showError ? "Wrong password" : (m_username.empty() ? "Locked" : m_username);
+        std::string caption;
+
+        if (m_showError)
+        {
+            caption = "Wrong password";
+        }
+        else
+        {
+            // Username and hostname are independent toggles - either,
+            // both ("user@host"), or neither ("Locked", the same
+            // fallback as before either existed) all fall out of this
+            // one bit of string-building rather than needing four
+            // separate cases spelled out.
+            std::string identity;
+
+            if (m_showUsername && !m_username.empty())
+                identity = m_username;
+
+            if (m_showHostname && !m_hostname.empty())
+                identity = identity.empty() ? m_hostname : identity + "@" + m_hostname;
+
+            caption = identity.empty() ? "Locked" : identity;
+        }
+
         int captionWidth = m_font.TextWidth(caption);
 
         m_font.DrawString(

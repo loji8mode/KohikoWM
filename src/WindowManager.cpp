@@ -112,13 +112,22 @@ void WindowManager::Initialize()
     // exactly as it was, "lock right before suspending" and "lock
     // screen is already there the instant it wakes back up" end up
     // being the same thing, with no separate wake-detection code
-    // needed at all.
+    // needed at all. Whether this actually locks is governed by
+    // lockscreen.after - see LockScreenAutoOnSuspend()'s own comment.
     m_powerMenu.SetSuspendCallback(
         [this]()
         {
-            if (m_config.GetBool("lockscreen.lock_on_suspend", true))
+            if (LockScreenAutoOnSuspend())
                 m_lockScreen.Lock(m_monitors);
         });
+
+    // lockscreen.after=always additionally locks once right here, at
+    // startup - covering a freshly started or just-restarted session
+    // the same way "suspend"/"always" already cover a resume. A no-op
+    // for an account with no password configured, same as every other
+    // call to Lock() - see its own comment.
+    if (LockScreenAutoOnStartup())
+        m_lockScreen.Lock(m_monitors);
 
     m_windowRules = LoadWindowRules(m_config);
 
@@ -703,6 +712,24 @@ bool WindowManager::IsManaged(WindowID id) const
     return m_repository.Contains(id);
 }
 
+// --- lockscreen.after ---------------------------------------------------------
+
+bool WindowManager::LockScreenManualAllowed() const
+{
+    return Utils::Lower(m_config.GetString("lockscreen.after", "suspend")) != "never";
+}
+
+bool WindowManager::LockScreenAutoOnSuspend() const
+{
+    std::string mode = Utils::Lower(m_config.GetString("lockscreen.after", "suspend"));
+    return mode == "suspend" || mode == "always";
+}
+
+bool WindowManager::LockScreenAutoOnStartup() const
+{
+    return Utils::Lower(m_config.GetString("lockscreen.after", "suspend")) == "always";
+}
+
 // --- Command execution -------------------------------------------------------
 
 void WindowManager::Execute(const Command& command)
@@ -733,7 +760,12 @@ void WindowManager::Execute(const Command& command)
         case CommandType::Quit:             m_running = false;                     break;
         case CommandType::LauncherToggle:   ToggleLauncher();                      break;
         case CommandType::NotepadToggle:    ToggleNotepad();                       break;
-        case CommandType::Lock:             m_lockScreen.Lock(m_monitors);         break;
+        case CommandType::Lock:
+
+            if (LockScreenManualAllowed())
+                m_lockScreen.Lock(m_monitors);
+
+            break;
 
         case CommandType::LauncherReload:
             m_launcher.ReloadDesktopEntries();
