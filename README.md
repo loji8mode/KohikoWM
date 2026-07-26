@@ -36,27 +36,43 @@ a full compositor.
 - [The mouse: swap, move, and resize](#the-mouse-swap-move-and-resize)
 - [The launcher (Super+D)](#the-launcher-superd)
 - [The notepad (Super+N)](#the-notepad-supern)
+- [The power menu](#the-power-menu)
+- [Native lock screen](#native-lock-screen)
 - [Fonts and languages](#fonts-and-languages)
 - [kohikoctl / IPC](#kohikoctl--ipc)
 - [Architecture](#architecture)
-- [Known limitations](#known-limitations)
+- [Done](#done)
+- [Planned](#planned)
+- [Intentionally unsupported](#intentionally-unsupported)
 
 ## Building
 
 You need a C++20 compiler and the X11 development headers, plus Imlib2
-(icon loading and rendering for the launcher/notepad - icon-theme *lookup*
-is Kohiko's own freedesktop Icon Theme Specification implementation, see
-`include/IconResolver.h`, so no toolkit dependency is needed for that) and
+(icon loading and rendering for the launcher/notepad, and the lock
+screen's optional background/logo images - icon-theme *lookup* is
+Kohiko's own freedesktop Icon Theme Specification implementation, see
+`include/IconResolver.h`, so no toolkit dependency is needed for that),
 Xft/fontconfig (text rendering - see
-[Fonts and languages](#fonts-and-languages)). There's no Qt, GTK, or
-compositor dependency of any kind, and no toolkit is used for the
-bar/launcher/notepad's own UI - just plain Xlib shapes plus Xft text.
+[Fonts and languages](#fonts-and-languages)), and libpam (the lock
+screen's authentication - see [Native lock screen](#native-lock-screen)).
+There's no Qt, GTK, or compositor dependency of any kind, and no toolkit
+is used for the bar/launcher/notepad/lock screen's own UI - just plain
+Xlib shapes plus Xft text.
 
 ```sh
 sudo apt install build-essential libx11-dev libimlib2-dev \
-                  libxft-dev libfontconfig-dev fonts-dejavu-core
+                  libxft-dev libfontconfig-dev libpam0g-dev fonts-dejavu-core
 # optional, for multi-monitor geometry:
 sudo apt install libxrandr-dev
+```
+
+Also install the lock screen's PAM service file - without it, every
+password is rejected (or, on some distros, PAM's own fallback silently
+takes over instead - see [Native lock screen](#native-lock-screen) for
+exactly what happens and why installing this matters either way):
+
+```sh
+sudo cp pam/kohiko /etc/pam.d/kohiko
 ```
 
 Two build systems are provided; pick whichever you'd rather have installed.
@@ -179,6 +195,26 @@ windowrule=tile class:tlauncher
 
 monitor=HDMI-1,workspace=1              # see Multi-monitor below
 ```
+
+### Preparing for a future config GUI
+
+There's no configuration GUI yet, and building one isn't planned for right
+now - but `include/ConfigSchema.h` exists specifically so one can be added
+later without a separate audit pass over every setting first. It's a
+small, independent metadata registry (category, type, default, a human
+description, and allowed values for anything enum-like) describing what a
+GUI would need to render categorized, searchable settings with an inline
+"what does this do" info icon per option - entirely separate from
+`Config` itself, which stays exactly the simple untyped key=value store
+it's always been and doesn't reference `ConfigSchema` at all.
+
+The convention going forward: any new setting added to Kohiko should get
+a matching `ConfigOption` entry in `ConfigSchema.cpp` alongside its
+`config/default.conf` documentation, not instead of it. `ConfigSchema`
+currently isn't read by anything at runtime - it's dormant scaffolding,
+not a feature - but keeping it in sync as new settings appear is what
+actually makes a future GUI buildable straight from this file rather than
+needing to reverse-engineer one from every comment in `default.conf`.
 
 Reload after editing without restarting: `kohikoctl reload` (also bound to
 `Super+Shift+C` by default). `auto_start_programs` and `workspace<N>=` are
@@ -574,7 +610,8 @@ that immediately, live, with no restart required.
 ## The notepad (Super+N)
 
 `Super+N` toggles a small native scratch-notes box: free-form multi-line
-text (typing, `Enter` for a new line, `Backspace`/`Delete`, arrow keys,
+text (typing, `Enter` for a new line, `Backspace`/`Delete`,
+`Ctrl+Backspace`/`Ctrl+Delete` for whole-word deletes, arrow keys,
 `Home`/`End`), saved automatically to `~/.config/kohiko/notepad.txt` and
 restored from there on every restart. `Escape` hides it again (saving on
 the way out) without closing or discarding anything.
@@ -592,6 +629,78 @@ widget with its own tiny text buffer, again with no toolkit or external
 process involved. The trade-off is a correspondingly small feature set: no
 undo, no selection, no copy/paste - it's meant for jotting something down,
 not replacing a real editor.
+
+Both the launcher and the notepad always open centered on whichever
+monitor currently has the mouse cursor (falling back to the focused
+monitor, then the primary one, if the cursor is outside every monitor) -
+not pinned to a single monitor regardless of where you're actually
+working.
+
+## The power menu
+
+Every bar has its own `[Power]` button on the right, next to the clock.
+Clicking it opens a small popup directly under the button with exactly
+three rows - Shutdown, Restart, Suspend - each running a plain shell
+command configured via `power.shutdown_command`/`power.restart_command`/
+`power.suspend_command` (`systemctl poweroff`/`reboot`/`suspend` by
+default; see `config/default.conf`). Click a row to run it, or click
+anywhere else / press `Escape` to dismiss the menu without running
+anything.
+
+## Native lock screen
+
+`Super+Shift+L`, `kohikoctl dispatch lock`, or automatically right before
+Suspend (see below) locks the screen: full-screen on every monitor, a
+password field with hidden input, `Escape` clears whatever's typed
+(it never unlocks), `Enter` authenticates. No dependency on `i3lock`,
+`betterlockscreen`, or any other external locker.
+
+Authentication goes through PAM, using a service named `kohiko` - install
+`pam/kohiko` from this repo as `/etc/pam.d/kohiko` first (see
+[Building](#building)). Without it, PAM falls through to
+`/etc/pam.d/other`, and what happens next depends on your distro:
+Arch/Fedora/RHEL ship a strict deny-everything `other`, so the lock
+screen shows up and runs but no password is ever accepted; Debian/Ubuntu's
+default `other` just includes the same common-auth stack a real password
+would already pass, which means an *unconfigured* lock screen could still
+silently accept the right password there. Either way, install the file
+rather than relying on whatever your distro's fallback happens to do.
+
+If the current user's account has no password configured at all, locking
+unlocks immediately - checked by attempting to authenticate with an empty
+password right then, the same way a real attempt would be, rather than
+parsing `/etc/shadow` directly.
+
+While locked, Kohiko holds an active keyboard and pointer grab - not just
+window stacking and real X input focus the way the launcher/notepad get
+away with. Stacking alone wouldn't stop Kohiko's own global hotkeys
+(bound as passive grabs on the root window) from still firing underneath,
+or a misbehaving client that calls `XSetInputFocus` on itself directly
+from stealing keystrokes - including the password itself.
+
+Suspend integration doesn't depend on `logind`/DBus sleep signals: since
+Kohiko itself is what spawns `power.suspend_command` (see
+[The power menu](#the-power-menu)), it locks the screen *before* issuing
+that command rather than trying to detect the resume afterward
+(`lockscreen.lock_on_suspend`, on by default). Suspending freezes the
+whole machine - X server, Kohiko, and every active grab included - and
+resumes it exactly as it was, so "lock right before suspending" and "the
+lock screen is already there the instant it wakes back up" end up being
+the same thing, with no separate wake-detection needed at all.
+
+Configurable via `lockscreen.*` in `config/default.conf`: background
+color, an optional background image (stretched to fill each monitor) and
+an optional logo (centered above the password field, drawn at a fixed
+size), foreground/field/error colors, and font (falls back to
+`general.font` if unset).
+
+**A security note, same as every other X11 screen locker's own
+documentation says of itself:** this locks the X *session* - it's exactly
+as trustworthy as X11 itself is against someone with hardware access to
+the machine (a VT switch, physically power-cycling it, or ptrace-level
+access to the process from another account), which is a limitation of
+the X11 security model generally, not something specific to Kohiko's own
+implementation.
 
 ## Fonts and languages
 
@@ -700,31 +809,81 @@ in a row) gets pulled out of the tree and switched to floating -
 `general.tiling_misbehavior_fallback` - rather than being forced back
 into a tile it's already shown it won't render into correctly.
 
-## Known limitations
+## Done
 
-- **The launcher and notepad are single, global panels, always on the
-  primary monitor** - not one per output, unlike the bar (see
-  [Multi-monitor](#multi-monitor)). Every workspace/window still tiles
-  and floats correctly on whichever monitor it's actually on; it's
-  specifically these two modal overlays that don't (yet) follow you
-  across monitors.
-- **The scratchpad holds one window at a time** - assign a new one only
-  after closing (or `Super+Space`-releasing) the current occupant.
-- Moving a **floating** window around isn't bound to anything by design
-  (see above); it spawns centered and stays wherever the client puts it or
-  wherever you leave it via its own controls.
-- **The notepad is intentionally minimal** - no undo, no text selection,
-  no copy/paste. It's a quick-notes box, not a text editor.
-- **Kohiko doesn't adopt windows that were already mapped by a previous
-  window manager** - it only manages windows that map *after* it starts
-  (the usual `MapRequest`-driven flow every X11 WM relies on). Restarting
-  Kohiko itself while other windows are already open will leave those
-  specific windows unmanaged until they're reopened; this isn't new
-  behaviour, just worth knowing about.
-- **`general.tiling_misbehavior_*` detects fighting via repeated,
-  conflicting `ConfigureRequest`s** (see `config/default.conf`) - the
-  only signal X11 actually gives a window manager for "this client
-  isn't happy with the geometry it was given". It can't see rendering
-  glitches directly, so a client that visually misrenders without ever
-  asking to be resized won't trip it; `windowrule=float` (or `=tile`)
-  on that specific application remains the direct fix for those.
+- **BSP tiling** with `Super+LMB` swap-drag and `Super+RMB` resize-drag,
+  rotate/flip, and the misbehaving-client fallback described above.
+- **Multi-monitor**: independent per-monitor workspaces, focus-follows-
+  mouse per monitor, one bar per monitor, and live hotplug - connecting,
+  disconnecting, or reconfiguring a monitor re-detects the whole layout,
+  rebuilds bars, and re-homes any floating window left positioned off
+  every remaining monitor, without a restart.
+- **Adoption of already-mapped windows at startup** - restarting Kohiko
+  (or starting it into a session where other windows are already open)
+  manages whatever's already there exactly like a window opened normally:
+  tiled or floated per the same window rules, skipping only
+  override-redirect windows and other panels/docks (`_NET_WM_WINDOW_TYPE_DOCK`).
+- **The launcher (`Super+D`) and notepad (`Super+N`)** open centered on
+  whichever monitor the cursor is on - falling back to the focused
+  monitor, then the primary one, if the cursor is outside every monitor.
+- **The scratchpad** reliably keeps real X input focus across workspace
+  switches, so releasing it (`Super+Space`) or typing into it keeps
+  working no matter how many times you've switched away and back since
+  showing it.
+- **The notepad**: persisted multi-line text, a stable caret (drawn as
+  its own overlay rather than an inline character, so it doesn't reflow
+  the line or vanish depending on font), Home/End, and Ctrl+Backspace/
+  Ctrl+Delete word deletion.
+- **`kohikoctl` / IPC**: `reload`, `workspace <N>`, `movetoworkspace <N>`,
+  `launcher`, `notepad`, `scratchpad`, `close`, `focus <left|right|up|down|next|prev>`,
+  `move <left|right|up|down>`, `rotate`, `flip`, `focusmonitor`/
+  `movetomonitor <left|right|up|down|N>`, `exec`, `quit` - see
+  [kohikoctl / IPC](#kohikoctl--ipc).
+- **EWMH support**, the system tray, autostart, per-window rules
+  (`windowrule=`), per-monitor rules (`monitor=...,workspace=N`), and
+  keyboard layout switching - see their own sections above.
+- **Session restore** - every window's workspace, tiled/floating
+  state, floating geometry, monitor, and fullscreen state are
+  remembered across a restart and reapplied when it comes back up,
+  keyed off the window's own X11 ID (stable across a Kohiko-only
+  restart - see `session.restore_priority` in `config/default.conf`
+  for how a conflicting `windowrule=` and saved session are
+  reconciled). Also covers being stopped via `SIGTERM`/`SIGINT` (a
+  session manager restarting it, or a plain `pkill kohiko`), not just
+  a clean `kohikoctl quit`.
+- **A power menu on every bar** - shutdown/restart/suspend, nothing
+  else - see [The power menu](#the-power-menu).
+- **A native lock screen** - PAM-authenticated, no `i3lock`/
+  `betterlockscreen` dependency, integrated with Suspend - see
+  [Native lock screen](#native-lock-screen).
+
+## Planned
+
+- **A configuration GUI** - categories, grouped settings, search, and a
+  per-setting info icon explaining what it does, its default, and its
+  valid values. Not built yet; `ConfigSchema` (see
+  [Preparing for a future config GUI](#preparing-for-a-future-config-gui))
+  is the groundwork for it - a metadata registry a GUI could read
+  straight from, kept separate from `Config` itself so none of this
+  changes how configuration actually loads or is read today.
+
+## Intentionally unsupported
+
+- **The scratchpad holds one window at a time, by design** - assign a
+  new one only after closing (or `Super+Space`-releasing) the current
+  occupant. This isn't planned to change; a single scratchpad slot is
+  the whole point of it staying simple.
+- **The notepad is intentionally minimal** - no undo, no text
+  selection, no copy/paste. It's a quick-notes box, not a text editor,
+  and won't grow into one.
+- **Moving a floating window around isn't bound to anything, by
+  design** - it spawns centered and stays wherever the client puts it
+  or wherever you leave it via its own controls.
+- **`general.tiling_misbehavior_*` only ever detects fighting via
+  repeated, conflicting `ConfigureRequest`s** (see `config/default.conf`)
+  - the only signal X11 actually gives a window manager for "this
+  client isn't happy with the geometry it was given." It can't see
+  rendering glitches directly, so a client that visually misrenders
+  without ever asking to be resized won't trip it; `windowrule=float`
+  (or `=tile`) on that specific application remains the direct fix for
+  those.

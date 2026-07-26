@@ -56,7 +56,28 @@ Command Command::Parse(const std::string& text)
     }
     else if (action == "focus")
     {
-        command.type = CommandType::FocusDirection;
+        std::string dir;
+        stream >> dir;
+        dir = Utils::Lower(dir);
+
+        if (dir == "next" || dir == "prev" || dir == "previous")
+        {
+            command.type = CommandType::FocusCycle;
+            command.intArg = (dir == "next") ? 1 : -1;
+        }
+        else
+        {
+            command.type = CommandType::FocusDirection;
+
+            if (dir == "left")       command.directionArg = Direction::Left;
+            else if (dir == "right") command.directionArg = Direction::Right;
+            else if (dir == "up")    command.directionArg = Direction::Up;
+            else if (dir == "down")  command.directionArg = Direction::Down;
+        }
+    }
+    else if (action == "move")
+    {
+        command.type = CommandType::MoveDirection;
 
         std::string dir;
         stream >> dir;
@@ -106,6 +127,10 @@ Command Command::Parse(const std::string& text)
     else if (action == "notepad_toggle" || action == "notepad")
     {
         command.type = CommandType::NotepadToggle;
+    }
+    else if (action == "lock")
+    {
+        command.type = CommandType::Lock;
     }
     else if (action == "launcher_reload" || action == "reloadlauncher")
     {

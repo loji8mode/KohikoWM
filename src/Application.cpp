@@ -19,6 +19,8 @@ int Application::Run(
     std::signal(SIGCHLD, SIG_IGN);
     std::signal(SIGPIPE, SIG_IGN);
 
+    EventLoop::InstallSignalHandlers();
+
     Logger::Info(std::string("kohiko ") + VERSION + " starting");
 
     if (!m_connection.Connect())

@@ -201,6 +201,66 @@ void WindowManager::HandleLauncherButtonPress(
         m_launcher.HandleButtonPress(event);
 }
 
+bool WindowManager::HandleBarOrPowerMenuButtonPress(
+    const XButtonEvent& event)
+{
+    if (event.window == m_powerMenu.WindowId())
+    {
+        m_powerMenu.HandleButtonPress(event);
+        ClosePowerMenu();
+        return true;
+    }
+
+    for (const auto& [monitor, bar] : m_bars)
+    {
+        if (bar->WindowId() != event.window)
+            continue;
+
+        if (bar->PowerButtonRect().Contains(Point{event.x, event.y}))
+        {
+            if (m_powerMenu.IsOpen())
+            {
+                ClosePowerMenu();
+            }
+            else
+            {
+                Rect button = bar->PowerButtonRect();
+
+                Point anchor{
+                    bar->Geometry().x + button.x,
+                    bar->Geometry().y + button.Bottom()
+                };
+
+                ManagedWindow* focused = m_repository.Focused();
+                m_focusBeforeModal = focused ? focused->Id() : 0;
+
+                m_powerMenu.Open(anchor, monitor->Geometry());
+                m_connection.SetInputFocus(m_powerMenu.WindowId());
+            }
+        }
+        else if (m_powerMenu.IsOpen())
+        {
+            // A click elsewhere on the same bar (or a different one)
+            // reads the same as clicking any other background window
+            // while a modal is open: dismiss it without acting.
+            ClosePowerMenu();
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+void WindowManager::ClosePowerMenu()
+{
+    if (!m_powerMenu.IsOpen())
+        return;
+
+    m_powerMenu.Close();
+    RestoreFocusAfterModal();
+}
+
 bool MouseManager::Matches(
     const Binding& binding,
     unsigned int state,

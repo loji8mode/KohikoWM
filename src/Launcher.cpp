@@ -316,9 +316,8 @@ Launcher::~Launcher()
         XDestroyWindow(display, m_window);
 }
 
-void Launcher::Configure(
-    const Config& config,
-    const Rect& monitorGeometry)
+Rect Launcher::ComputeGeometry(
+    const Rect& monitorGeometry) const
 {
     // "About 1/12 of the screen" read as *area*, held at a wide,
     // single-line-input aspect ratio (a literal 1/12-area square would
@@ -338,10 +337,28 @@ void Launcher::Configure(
     height = std::clamp(height, 180, 350);
     width  = std::clamp(width, 320, static_cast<int>(static_cast<float>(monitorGeometry.width) * 0.9f));
 
-    m_geometry.width  = width;
-    m_geometry.height = 300;
-    m_geometry.x = monitorGeometry.x + (monitorGeometry.width  - width)  / 2;
-    m_geometry.y = monitorGeometry.y + (monitorGeometry.height - height) / 2.5;
+    Rect geometry;
+    geometry.width  = width;
+    geometry.height = 300;
+    geometry.x = monitorGeometry.x + (monitorGeometry.width  - width)  / 2;
+    geometry.y = monitorGeometry.y + (monitorGeometry.height - height) / 2.5;
+    return geometry;
+}
+
+void Launcher::Reposition(
+    const Rect& monitorGeometry)
+{
+    m_geometry = ComputeGeometry(monitorGeometry);
+
+    if (m_window != 0)
+        m_connection.MoveResizeWindow(m_window, m_geometry);
+}
+
+void Launcher::Configure(
+    const Config& config,
+    const Rect& monitorGeometry)
+{
+    m_geometry = ComputeGeometry(monitorGeometry);
 
     Display* display = m_connection.GetDisplay();
     int screen = m_connection.Screen();

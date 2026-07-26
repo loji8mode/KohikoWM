@@ -223,6 +223,24 @@ public:
     // window) rather than either check alone deciding it.
     bool IsFloatingWindowType(::Window window, const XAtoms& atoms);
 
+    // True if _NET_WM_WINDOW_TYPE declares this window a DOCK - a
+    // taskbar/panel/status-bar-style window. Kohiko is its own bar
+    // (see Bar.h) and has no docking/strut logic of its own, so the
+    // only thing this is used for is telling Manage()'s window-
+    // adoption path (see WindowManager::AdoptExistingWindows()) not
+    // to swallow some *other* already-running panel into the tiling
+    // layout - the same reason that path also skips override-redirect
+    // windows.
+    bool IsDockWindowType(::Window window, const XAtoms& atoms);
+
+    // Direct children of the root window, in bottom-to-top stacking
+    // order (as XQueryTree returns them) - used once, at startup, by
+    // WindowManager::AdoptExistingWindows() to find windows mapped by
+    // a previous window manager. Nothing else needs a live view of
+    // the whole window tree; every other window discovery in this
+    // codebase happens window-by-window, driven off events.
+    std::vector<::Window> QueryChildren(::Window window);
+
     std::string LastError() const;
 
 private:

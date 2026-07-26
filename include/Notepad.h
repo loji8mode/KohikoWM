@@ -47,6 +47,13 @@ public:
         const Rect& monitorGeometry
     );
 
+    // Re-centers the (already-created) window on `monitorGeometry` -
+    // see Launcher::Reposition() for why this is a separate, cheaper
+    // call from Configure() rather than just calling Configure() again.
+    void Reposition(
+        const Rect& monitorGeometry
+    );
+
     void Open();
 
     // Hides the window and saves content to disk.
@@ -71,6 +78,22 @@ public:
 
 private:
 
+    Rect ComputeGeometry(
+        const Rect& monitorGeometry
+    ) const;
+
+    // Word boundary within m_lines[m_row], for Ctrl+Backspace /
+    // Ctrl+Delete - clamped to the line itself (0 / line.size()), so
+    // hitting either end just falls back to the plain BackSpace/Delete
+    // line-join behaviour rather than needing its own cross-line case.
+    std::size_t PreviousWordBoundary(
+        std::size_t col
+    ) const;
+
+    std::size_t NextWordBoundary(
+        std::size_t col
+    ) const;
+
     void Redraw();
 
     void Load();
@@ -81,6 +104,12 @@ private:
 private:
 
     XConnection& m_connection;
+
+    // notepad.width/notepad.height, resolved once in Configure() and
+    // reused by Reposition() so re-centering on a different monitor
+    // never needs a Config reference of its own.
+    float m_widthFraction  = 0.4f;
+    float m_heightFraction = 0.5f;
 
     ::Window m_window = 0;
     GC m_gc = nullptr;

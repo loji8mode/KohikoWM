@@ -88,6 +88,19 @@ public:
         SystemTray* tray
     );
 
+    // Where the "[Power]" button was last drawn, in this bar's own
+    // window coordinates - WindowManager hit-tests a ButtonPress
+    // against this to decide whether to open PowerMenu. Empty (all
+    // zeros) before the first Redraw(), which Rect::Contains() treats
+    // correctly as "nothing there yet" since a real click position is
+    // never negative.
+    const Rect& PowerButtonRect() const;
+
+    // This bar's own on-screen position/size - WindowManager needs it
+    // to translate PowerButtonRect() (bar-window-relative) into the
+    // root-relative coordinates PowerMenu::Open() expects.
+    const Rect& Geometry() const;
+
     // Redraws everything, including the clock. Cheap enough to call
     // on every relevant WindowManager event plus once a second.
     void Redraw();
@@ -130,6 +143,8 @@ private:
     std::chrono::steady_clock::time_point m_notificationExpiry;
 
     SystemTray* m_tray = nullptr;
+
+    Rect m_powerButtonRect;
 
     unsigned long m_backgroundPixel = 0;
     unsigned long m_foregroundPixel = 0;

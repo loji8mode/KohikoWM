@@ -8,10 +8,13 @@
 #include "KeyboardManager.h"
 #include "Launcher.h"
 #include "LayoutEngine.h"
+#include "LockScreen.h"
 #include "MonitorManager.h"
 #include "MouseManager.h"
 #include "Notepad.h"
+#include "PowerMenu.h"
 #include "Scratchpad.h"
+#include "SessionStore.h"
 #include "SystemTray.h"
 #include "Types.h"
 #include "WindowRepository.h"
@@ -113,6 +116,16 @@ public:
     void HandleExpose(const XExposeEvent& event);
     void HandleClientMessage(const XClientMessageEvent& event);
     void HandleLauncherButtonPress(const XButtonEvent& event);
+
+    // Handles a ButtonPress that landed on any bar window or the
+    // open PowerMenu itself - returns false for anything else, so
+    // EventDispatcher's caller falls through to its normal
+    // Mod4Mask/client handling exactly as before this existed. See
+    // EventDispatcher.cpp's ButtonPress case for where this sits in
+    // that priority chain.
+    bool HandleBarOrPowerMenuButtonPress(const XButtonEvent& event);
+
+    void ClosePowerMenu();
     ::Window LauncherWindowId() const;
 
     // XRandR's event numbers are only known at runtime (see
@@ -203,6 +216,16 @@ private:
 
     void Manage(WindowID id);
     void Unmanage(WindowID id);
+
+    // Startup-only: walks the root window's existing children and
+    // Manage()s whatever a previous window manager (or no window
+    // manager at all - a bare X session) left mapped, so restarting
+    // Kohiko looks the same as it never having restarted at all,
+    // rather than leaving every already-open window unmanaged until
+    // it's individually reopened. See Initialize()'s call site for
+    // exactly where this needs to run relative to everything else
+    // startup does.
+    void AdoptExistingWindows();
 
     void Focus(WindowID id);
 
@@ -311,9 +334,32 @@ private:
     void ToggleScratchpadForFocused();
     void CloseFocused();
     void FocusDirection(Direction direction);
+
+    // Swaps the focused tiled window with its neighbor in `direction`
+    // (via the existing SwapWindows() helper) - unlike FocusDirection,
+    // focus stays on the window that moved.
+    void MoveFocusedDirection(Direction direction);
+
+    // Cycles real focus among every visible window on the focused
+    // monitor's workspace, in Visible()'s order, wrapping around;
+    // `step` is +1 for "next", -1 for "prev". A plain, spatial-
+    // direction-agnostic alternative to FocusDirection() for simple
+    // "just cycle through my windows" bindings.
+    void FocusCycle(int step);
+
     void RotateFocused();
     void FlipFocused();
     void ReloadConfig();
+
+    // Which monitor the launcher/notepad should open centered on:
+    // whichever one currently contains the cursor (a fresh
+    // QueryPointer(), not whatever UpdateFocusedMonitorFromPointer()
+    // last recorded, so this is correct even if nothing has moved the
+    // mouse since Kohiko started); if the cursor is outside every
+    // monitor (a hotplug in progress, or a screen-locking edge case),
+    // whichever monitor is Focused(); Primary() only if neither of
+    // those resolves to anything.
+    Monitor& MonitorForModal() const;
 
     void ToggleLauncher();
     void CloseLauncher(bool run);
@@ -620,6 +666,7 @@ private:
     MonitorManager m_monitors;
     LayoutEngine m_layout;
     Scratchpad m_scratchpad;
+    SessionStore m_session;
 
     KeyboardManager m_keyboard;
     MouseManager m_mouse;
@@ -636,6 +683,8 @@ private:
     SystemTray m_tray;
     Launcher m_launcher;
     Notepad m_notepad;
+    PowerMenu m_powerMenu;
+    LockScreen m_lockScreen;
     Animator m_animator;
 
     bool m_running = true;

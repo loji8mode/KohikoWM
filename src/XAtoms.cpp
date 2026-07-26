@@ -40,6 +40,7 @@ void XAtoms::Initialize()
     NET_WM_WINDOW_TYPE_POPUP_MENU = XInternAtom(display, "_NET_WM_WINDOW_TYPE_POPUP_MENU", False);
     NET_WM_WINDOW_TYPE_DROPDOWN_MENU = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU", False);
     NET_WM_WINDOW_TYPE_MENU       = XInternAtom(display, "_NET_WM_WINDOW_TYPE_MENU", False);
+    NET_WM_WINDOW_TYPE_DOCK       = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DOCK", False);
 
     WM_WINDOW_ROLE           = XInternAtom(display, "WM_WINDOW_ROLE", False);
 

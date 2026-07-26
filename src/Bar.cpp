@@ -54,7 +54,7 @@ void Bar::Configure(
         XSetWindowAttributes attrs{};
         attrs.override_redirect = True; // this is *our* window - never redirect it back to ourselves as a MapRequest
         attrs.background_pixel = BlackPixel(display, screen);
-        attrs.event_mask = ExposureMask;
+        attrs.event_mask = ExposureMask | ButtonPressMask;
 
         m_window = XCreateWindow(
             display,
@@ -177,6 +177,16 @@ int Bar::Height() const
     return m_height;
 }
 
+const Rect& Bar::PowerButtonRect() const
+{
+    return m_powerButtonRect;
+}
+
+const Rect& Bar::Geometry() const
+{
+    return m_geometry;
+}
+
 void Bar::Redraw()
 {
     if (!m_visible || m_window == 0)
@@ -241,6 +251,23 @@ void Bar::Redraw()
 
     if (clockWidth == 0)
         clockWidth = clockLen * 8;
+
+    // The power button - see PowerButtonRect()/WindowManager's own
+    // ButtonPress routing for what opens PowerMenu. Plain bracketed
+    // text rather than a glyph/icon, same reasoning as the "[S]"/"[N]"
+    // indicators above: not every installed font covers a power
+    // symbol, and a missing one would just draw a tofu box.
+    static const std::string kPowerLabel = "[Power]";
+    int powerWidth = m_font.TextWidth(kPowerLabel);
+
+    if (powerWidth == 0)
+        powerWidth = static_cast<int>(kPowerLabel.size()) * 8;
+
+    int powerX = m_geometry.width - clockWidth - 12 - trayWidth - powerWidth - 16;
+
+    DrawText(powerX, baseline, kPowerLabel, m_foregroundPixel);
+
+    m_powerButtonRect = Rect{powerX - 6, 0, powerWidth + 12, m_height};
 
     DrawText(m_geometry.width - clockWidth - 12 - trayWidth, baseline, clockText, m_foregroundPixel);
 

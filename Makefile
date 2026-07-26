@@ -9,7 +9,7 @@ CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra
 INCLUDES := -Iinclude
 INCLUDES += $(shell pkg-config --cflags xft fontconfig)
 
-LIBS := -lX11 -lImlib2
+LIBS := -lX11 -lImlib2 -lpam
 LIBS += $(shell pkg-config --libs xft fontconfig)
 
 SRC := $(wildcard src/*.cpp)

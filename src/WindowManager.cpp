@@ -41,6 +41,8 @@ WindowManager::WindowManager(
     m_ipc(),
     m_launcher(connection),
     m_notepad(connection),
+    m_powerMenu(connection),
+    m_lockScreen(connection),
     m_animator()
 {
 }
@@ -98,6 +100,25 @@ void WindowManager::Initialize()
 
     m_launcher.Configure(m_config, m_monitors.Primary().Geometry());
     m_notepad.Configure(m_config, m_monitors.Primary().Geometry());
+    m_powerMenu.Configure(m_config);
+    m_lockScreen.Configure(m_config);
+
+    // Suspend integration without needing a DBus/logind sleep-signal
+    // dependency: Kohiko itself is what spawns the suspend command
+    // (see PowerMenu), so it locks the screen *before* issuing it
+    // rather than trying to detect the resume afterward. Since
+    // suspend just freezes the whole machine - X server, this
+    // process, and every active grab included - and resumes it
+    // exactly as it was, "lock right before suspending" and "lock
+    // screen is already there the instant it wakes back up" end up
+    // being the same thing, with no separate wake-detection code
+    // needed at all.
+    m_powerMenu.SetSuspendCallback(
+        [this]()
+        {
+            if (m_config.GetBool("lockscreen.lock_on_suspend", true))
+                m_lockScreen.Lock(m_monitors);
+        });
 
     m_windowRules = LoadWindowRules(m_config);
 
@@ -126,6 +147,13 @@ void WindowManager::Initialize()
     // which XKB group is currently active.
     ApplyKeyboardLayouts();
 
+    // Adopt whatever a previous window manager (or no window manager
+    // at all) left mapped, before autostart adds anything new - see
+    // AdoptExistingWindows()'s own comment for why this needs
+    // m_windowRules/monitors/bars already set up, which by this point
+    // in Initialize() they are.
+    AdoptExistingWindows();
+
     // Autostart programs launch exactly once here, after the bar/tray/
     // launcher above are already up, so anything they immediately try
     // to dock (a tray icon, a notification) has somewhere to land.
@@ -149,8 +177,50 @@ void WindowManager::Initialize()
     UpdateFocusedMonitorFromPointer(m_connection.QueryPointer());
 }
 
+void WindowManager::AdoptExistingWindows()
+{
+    // Direct children of the root, bottom-to-top - exactly what a
+    // previous window manager (or a bare X session with none at all)
+    // left mapped. Manage() itself already re-checks override-redirect,
+    // dock-type, and Kohiko's own bar/launcher/notepad windows - the
+    // one thing specific to *this* path is map_state: a normal
+    // MapRequest never fires for a window that isn't trying to become
+    // visible, but a blind scan of root's children can turn up
+    // withdrawn/iconified ones too, and those get nothing from being
+    // pulled into the tiling layout right now.
+    for (::Window child : m_connection.QueryChildren(m_connection.Root()))
+    {
+        XWindowAttributes attrs{};
+
+        if (!m_connection.GetWindowAttributes(child, attrs))
+            continue;
+
+        if (attrs.override_redirect)
+            continue;
+
+        // A window sitting on a workspace that wasn't the active one
+        // when Kohiko last exited is unmapped at the X level too -
+        // that's Kohiko's own doing (see Arrange()), not the client
+        // withdrawing - so a saved Session Restore record for it
+        // means it should be adopted right alongside every genuinely
+        // viewable window. Only a window with *neither* a saved
+        // record nor a viewable map_state gets skipped here, which is
+        // exactly "avoid managing... [things not meant to be managed]"
+        // for the plain (no previous Kohiko session at all) adoption
+        // case this otherwise is.
+        bool hasSessionRecord = m_session.Find(child) != nullptr;
+
+        if (attrs.map_state != IsViewable && !hasSessionRecord)
+            continue;
+
+        Manage(child);
+    }
+}
+
 void WindowManager::Shutdown()
 {
+    m_session.Save(m_repository.All(), m_monitors);
+
     m_ipc.Stop();
     m_tray.Shutdown();
 
@@ -183,6 +253,8 @@ void WindowManager::Tick()
 
     if (m_notepad.IsOpen())
         m_notepad.Blink();
+
+    m_lockScreen.Tick();
 
     // Also what clears a Bar::ShowNotification() once it expires - see
     // Bar::Redraw()'s own expiry check.
@@ -448,6 +520,9 @@ void WindowManager::HandlePropertyNotify(const XPropertyEvent& event)
 
 void WindowManager::HandleButtonPressOnClient(const XButtonEvent& event)
 {
+    if (m_lockScreen.IsLocked())
+        return;
+
     // Clicking a background window while the Launcher/Notepad is open
     // reads as "I'm done with this" - dismiss it first (as a cancel,
     // not a run) rather than leaving it visually open but no longer
@@ -457,6 +532,9 @@ void WindowManager::HandleButtonPressOnClient(const XButtonEvent& event)
 
     if (m_notepad.IsOpen())
         CloseNotepad();
+
+    if (m_powerMenu.IsOpen())
+        ClosePowerMenu();
 
     if (m_repository.Contains(event.window))
         Focus(event.window);
@@ -475,6 +553,10 @@ void WindowManager::HandleExpose(const XExposeEvent& event)
         m_launcher.HandleExpose();
     else if (event.window == m_notepad.WindowId())
         m_notepad.HandleExpose();
+    else if (event.window == m_powerMenu.WindowId())
+        m_powerMenu.HandleExpose();
+    else if (event.window == m_lockScreen.WindowId())
+        m_lockScreen.HandleExpose();
 }
 
 void WindowManager::HandleClientMessage(const XClientMessageEvent& event)
@@ -571,6 +653,20 @@ void WindowManager::HandleMonitorEvent(const XEvent& event)
 
 bool WindowManager::HandleModalKeyPress(const XKeyEvent& event)
 {
+    // Checked before anything else: while locked, nothing else in
+    // this chain - launcher, notepad, power menu, global hotkeys via
+    // KeyboardManager - should be reachable at all. In practice the
+    // active XGrabKeyboard LockScreen::Lock() takes already routes
+    // every KeyPress event's window to the lock screen regardless
+    // (see its own header comment), but this check is what actually
+    // stops Kohiko's own hotkey matching from running on it, not the
+    // grab itself.
+    if (m_lockScreen.IsLocked())
+    {
+        m_lockScreen.HandleKeyPress(event);
+        return true;
+    }
+
     if (m_launcher.IsOpen())
     {
         switch (m_launcher.HandleKeyPress(event))
@@ -587,6 +683,14 @@ bool WindowManager::HandleModalKeyPress(const XKeyEvent& event)
     {
         if (m_notepad.HandleKeyPress(event) == NotepadResult::Closed)
             CloseNotepad();
+
+        return true;
+    }
+
+    if (m_powerMenu.IsOpen())
+    {
+        if (m_powerMenu.HandleKeyPress(event))
+            ClosePowerMenu();
 
         return true;
     }
@@ -619,6 +723,8 @@ void WindowManager::Execute(const Command& command)
         case CommandType::Workspace:        SwitchWorkspace(command.intArg);       break;
         case CommandType::MoveToWorkspace:  MoveFocusedToWorkspace(command.intArg);break;
         case CommandType::FocusDirection:   FocusDirection(command.directionArg);  break;
+        case CommandType::MoveDirection:    MoveFocusedDirection(command.directionArg); break;
+        case CommandType::FocusCycle:       FocusCycle(command.intArg);            break;
         case CommandType::Rotate:           RotateFocused();                       break;
         case CommandType::Flip:             FlipFocused();                         break;
         case CommandType::FocusMonitor:     FocusMonitorCommand(command.stringArg);      break;
@@ -627,6 +733,7 @@ void WindowManager::Execute(const Command& command)
         case CommandType::Quit:             m_running = false;                     break;
         case CommandType::LauncherToggle:   ToggleLauncher();                      break;
         case CommandType::NotepadToggle:    ToggleNotepad();                       break;
+        case CommandType::Lock:             m_lockScreen.Lock(m_monitors);         break;
 
         case CommandType::LauncherReload:
             m_launcher.ReloadDesktopEntries();
@@ -1044,12 +1151,24 @@ void WindowManager::Manage(WindowID id)
     // combination" means in practice: CloseFocused() only ever acts on
     // m_repository.Focused(), and this is what keeps that set free of
     // Kohiko's own popups by construction, not by convention.
-    if (BarWindowMatching(id) || id == m_launcher.WindowId() || id == m_notepad.WindowId())
+    if (BarWindowMatching(id) || id == m_launcher.WindowId() || id == m_notepad.WindowId() || id == m_powerMenu.WindowId() || id == m_lockScreen.WindowId())
         return;
 
     XWindowAttributes attrs{};
 
     if (m_connection.GetWindowAttributes(id, attrs) && attrs.override_redirect)
+        return;
+
+    // Some other panel/taskbar (not Kohiko's own Bar) declaring
+    // _NET_WM_WINDOW_TYPE_DOCK - most set override-redirect too and
+    // never reach here at all, but that's a convention, not something
+    // EWMH requires, so this is the one check that reliably catches
+    // the rest. Matters most for AdoptExistingWindows() at startup
+    // (a leftover panel from before Kohiko started is exactly the
+    // "docks/panels" case that path has to leave alone), but applies
+    // here rather than only there so a dock mapped *after* startup is
+    // never swallowed into the tiling layout either.
+    if (m_connection.IsDockWindowType(id, m_atoms))
         return;
 
     ManagedWindow* window = m_repository.Add(id);
@@ -1117,6 +1236,17 @@ void WindowManager::Manage(WindowID id)
     // for tiling room on depends on it.
     int autostartWorkspace = ResolveWorkspaceAutostart(window->Pid());
 
+    // Session Restore: a record here means this exact X11 Window ID
+    // was already managed - and had its state saved - the last time
+    // Kohiko ran (see SessionStore's header comment for why the ID
+    // itself is a reliable enough match). `sessionPriority` reflects
+    // session.restore_priority (config/session, default config) and
+    // is reused below for the float/tile decision too - see
+    // AdoptExistingWindows() for the startup call site that makes
+    // most windows this actually fires for.
+    const SessionWindowState* session = m_session.Find(id);
+    bool sessionPriority = Utils::Lower(m_config.GetString("session.restore_priority", "config")) == "session";
+
     // A `windowrule=workspace:N` match ("open Telegram's media viewer
     // on its own dedicated workspace instead of cluttering whatever's
     // current" is the motivating example) has to land before the
@@ -1133,8 +1263,15 @@ void WindowManager::Manage(WindowID id)
     // parent-attachment too, but an explicit windowrule is still the
     // more deliberate, more specific override and takes precedence
     // over it.
-    if (rules.forceWorkspace >= 1 && rules.forceWorkspace <= m_workspaces.Count())
+    bool hasConfigWorkspace = rules.forceWorkspace >= 1 && rules.forceWorkspace <= m_workspaces.Count();
+    bool hasSessionWorkspace = session && session->workspace >= 1 && session->workspace <= m_workspaces.Count();
+
+    if (sessionPriority && hasSessionWorkspace)
+        window->SetWorkspace(session->workspace);
+    else if (hasConfigWorkspace)
         window->SetWorkspace(rules.forceWorkspace);
+    else if (hasSessionWorkspace)
+        window->SetWorkspace(session->workspace);
     else if (autostartWorkspace >= 1 && autostartWorkspace <= m_workspaces.Count())
         window->SetWorkspace(autostartWorkspace);
     else if (parent)
@@ -1153,7 +1290,19 @@ void WindowManager::Manage(WindowID id)
     // window that isn't visible anywhere yet, so the one the user is
     // actually looking at is the least surprising choice.
     Monitor* shownOn = MonitorShowing(window->Workspace());
-    Monitor& targetMonitor = shownOn ? *shownOn : FocusedMonitor();
+
+    // Only reached when nothing is currently showing this window's
+    // workspace at all - if some monitor already is, that's always
+    // the right answer regardless of session state (see comment
+    // above). A saved output name that isn't connected right now
+    // (or wasn't saved at all) just falls through to FocusedMonitor()
+    // exactly as before session restore existed.
+    Monitor* sessionMonitor =
+        (!shownOn && session && !session->monitorName.empty())
+            ? m_monitors.FindByName(session->monitorName)
+            : nullptr;
+
+    Monitor& targetMonitor = shownOn ? *shownOn : (sessionMonitor ? *sessionMonitor : FocusedMonitor());
     window->SetMonitor(targetMonitor.Id());
 
     // `windowrule=tile` is an explicit "no matter what this
@@ -1173,13 +1322,44 @@ void WindowManager::Manage(WindowID id)
     // floats - only a plain window with none of those (EWMH's
     // definition of NORMAL) ever reaches TryTile() below, so only
     // NORMAL windows ever enter the BSP tree.
-    bool wantsFloat = !rules.forceTile && (rules.forceFloat || isTransient || isFloatingType);
+    // `windowrule=tile`/`=float` are explicit per-window overrides;
+    // session.restore_priority decides whether they or a saved
+    // session state win when both exist and disagree - see this
+    // function's session/sessionPriority comment above. Absent either
+    // opinion, a plain window falls back to the client-type heuristics
+    // (dialog/transient/etc.) exactly as before session restore
+    // existed.
+    bool configHasFloatOpinion = rules.forceFloat || rules.forceTile;
+    bool configWantsFloat = !rules.forceTile && rules.forceFloat;
+    bool sessionHasFloatOpinion = session != nullptr;
+
+    bool wantsFloat;
+
+    if (sessionPriority && sessionHasFloatOpinion)
+        wantsFloat = session->floating;
+    else if (configHasFloatOpinion)
+        wantsFloat = configWantsFloat;
+    else if (sessionHasFloatOpinion)
+        wantsFloat = session->floating;
+    else
+        wantsFloat = (isTransient || isFloatingType);
 
     if (wantsFloat)
     {
         window->SetState(WindowState::Floating);
 
-        Rect geometry = CenteredFloatingRectForWindow(id, attrs, targetMonitor, parent);
+        // A saved floating geometry (real width/height, not the
+        // struct's zero-initialized default) takes precedence over
+        // re-centering it from scratch - restoring "where it actually
+        // was" is the whole point of session restore for a floating
+        // window. Falls back to the usual centered placement for a
+        // window with no saved geometry (nothing in session, or one
+        // whose class/type just started floating for the first time).
+        Rect geometry =
+            (session && session->floatingGeometry.width > 0 && session->floatingGeometry.height > 0)
+                ? session->floatingGeometry
+                : CenteredFloatingRectForWindow(id, attrs, targetMonitor, parent);
+
         window->SetGeometry(geometry);
         window->SetFloatingGeometry(geometry);
 
@@ -1276,12 +1456,18 @@ void WindowManager::Manage(WindowID id)
     // the whole screen to work at all, not open at some fraction of it
     // - is the motivating example for both) mean the same thing here:
     // this window should already be fullscreen the instant it appears,
-    // not tiled/floating-sized for one frame first. `nofullscreen`
-    // wins over both if a rule says this class should never be allowed
-    // real fullscreen at all.
+    // not tiled/floating-sized for one frame first. A saved session
+    // fullscreen state means the same thing for a restored window.
+    // `nofullscreen` wins over all three if a rule says this class
+    // should never be allowed real fullscreen at all - there's no
+    // real "priority" question here the way there is for
+    // workspace/float above, since none of these three sources ever
+    // actively says "must not be fullscreen" on their own; only
+    // denyFullscreen does.
     bool wantsFullscreen =
         !rules.denyFullscreen &&
-        (rules.forceFullscreen || m_connection.HasNetWmStateFullscreen(id, m_atoms));
+        (rules.forceFullscreen || (session && session->fullscreen) ||
+         m_connection.HasNetWmStateFullscreen(id, m_atoms));
 
     if (wantsFullscreen)
     {
@@ -1481,6 +1667,23 @@ void WindowManager::FocusNextAvailableOn(Monitor& monitor)
     // whatever the user is actually looking at.
     if (&monitor != m_monitors.Focused())
         return;
+
+    // Same reasoning as FocusMonitor()'s identical check: a shown
+    // scratchpad window doesn't count as "visible" for this workspace
+    // (WindowRepository::Visible() excludes it on purpose), but it can
+    // still be the only thing actually on screen for this monitor -
+    // e.g. the window underneath it just closed - and shouldn't lose
+    // real X focus just because Visible() came back empty.
+    if (m_scratchpad.HasWindow() && m_scratchpad.IsVisible())
+    {
+        ManagedWindow* scratch = m_repository.Get(m_scratchpad.Window());
+
+        if (scratch && scratch->Monitor() == monitor.Id())
+        {
+            Focus(scratch->Id());
+            return;
+        }
+    }
 
     m_repository.ClearFocus();
     m_connection.SetInputFocus(m_connection.Root());
@@ -1773,6 +1976,27 @@ void WindowManager::FocusMonitor(Monitor& monitor)
     {
         Focus(visible.front()->Id());
         return;
+    }
+
+    // A shown scratchpad window is a global overlay, not tied to any
+    // one workspace - WindowRepository::Visible() deliberately excludes
+    // it (see its own comment) so it never gets counted as "the"
+    // window for a workspace it isn't really on. But while it's the
+    // only thing actually on screen for this monitor, it still needs
+    // real X input focus, or the very next workspace switch back to
+    // this monitor silently drops focus to nothing: the window stays
+    // visible but unfocused, and every focused-window command
+    // (releasing it via toggle_floating, closing it, typing into it)
+    // quietly stops working until it's hidden and shown again.
+    if (m_scratchpad.HasWindow() && m_scratchpad.IsVisible())
+    {
+        ManagedWindow* scratch = m_repository.Get(m_scratchpad.Window());
+
+        if (scratch && scratch->Monitor() == monitor.Id())
+        {
+            Focus(scratch->Id());
+            return;
+        }
     }
 
     // Nothing on this monitor to focus - clear real X input focus
@@ -2204,6 +2428,46 @@ void WindowManager::FocusDirection(Direction direction)
         Focus(neighbor->Id());
 }
 
+void WindowManager::MoveFocusedDirection(Direction direction)
+{
+    ManagedWindow* window = m_repository.Focused();
+
+    if (!window || !window->IsTiled())
+        return;
+
+    ManagedWindow* neighbor =
+        m_workspaces.Get(window->Workspace()).Tree().FindNeighbor(window, direction);
+
+    if (neighbor)
+        SwapWindows(window, neighbor);
+}
+
+void WindowManager::FocusCycle(int step)
+{
+    Workspace* workspace = FocusedMonitor().ActiveWorkspace();
+
+    if (!workspace)
+        return;
+
+    auto visible = m_repository.Visible(workspace->Id());
+
+    if (visible.empty())
+        return;
+
+    ManagedWindow* current = m_repository.Focused();
+
+    auto it = std::find(visible.begin(), visible.end(), current);
+
+    int index = (it != visible.end())
+        ? static_cast<int>(std::distance(visible.begin(), it))
+        : 0;
+
+    int count = static_cast<int>(visible.size());
+    int next = ((index + step) % count + count) % count;
+
+    Focus(visible[static_cast<std::size_t>(next)]->Id());
+}
+
 void WindowManager::RotateFocused()
 {
     ManagedWindow* window = m_repository.Focused();
@@ -2381,6 +2645,20 @@ int WindowManager::ResolveWorkspaceAutostart(
     return 0;
 }
 
+Monitor& WindowManager::MonitorForModal() const
+{
+    Monitor* monitor =
+        m_monitors.Containing(m_connection.QueryPointer());
+
+    if (!monitor)
+        monitor = m_monitors.Focused();
+
+    if (!monitor)
+        monitor = &m_monitors.Primary();
+
+    return *monitor;
+}
+
 void WindowManager::ToggleLauncher()
 {
     if (m_launcher.IsOpen())
@@ -2395,6 +2673,7 @@ void WindowManager::ToggleLauncher()
     ManagedWindow* focused = m_repository.Focused();
     m_focusBeforeModal = focused ? focused->Id() : 0;
 
+    m_launcher.Reposition(MonitorForModal().Geometry());
     m_launcher.Open();
     m_connection.SetInputFocus(m_launcher.WindowId());
 }
@@ -2455,6 +2734,7 @@ void WindowManager::ToggleNotepad()
     ManagedWindow* focused = m_repository.Focused();
     m_focusBeforeModal = focused ? focused->Id() : 0;
 
+    m_notepad.Reposition(MonitorForModal().Geometry());
     m_notepad.Open();
     UpdateAllBars();
     m_connection.SetInputFocus(m_notepad.WindowId());
@@ -2937,6 +3217,10 @@ void WindowManager::HandleMonitorTopologyChanged()
     RebuildBars();
     RefreshMonitorWorkAreas();
     RelocateOrphanedFloatingWindows();
+
+    if (m_lockScreen.IsLocked())
+        m_lockScreen.Reposition(m_monitors);
+
     Arrange();
 
     // Same reasoning as the call at the end of Initialize(): a monitor

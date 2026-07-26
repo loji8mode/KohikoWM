@@ -81,6 +81,18 @@ public:
         const Rect& monitorGeometry
     );
 
+    // Re-centers the (already-created) window on `monitorGeometry`
+    // without touching anything Configure() reads from Config - just
+    // the same size/position math Configure() itself runs, followed
+    // by an XMoveResizeWindow if the window already exists. Called by
+    // WindowManager right before Open(), so the launcher always opens
+    // centered on whichever monitor currently has the cursor rather
+    // than staying pinned to wherever it first opened. A no-op before
+    // the first Configure() (m_window still 0).
+    void Reposition(
+        const Rect& monitorGeometry
+    );
+
     // Opens the box empty, mapped, raised - WindowManager still has to
     // give it real input focus afterwards (it owns focus policy).
     void Open();
@@ -119,6 +131,14 @@ public:
     void ReloadDesktopEntries();
 
 private:
+
+    // The "about 1/12 of the screen area, clamped" size/position math
+    // shared by Configure() (first-ever placement) and Reposition()
+    // (re-centering on a different monitor later) - see either call
+    // site for why the two need to be kept in sync.
+    Rect ComputeGeometry(
+        const Rect& monitorGeometry
+    ) const;
 
     void Redraw();
     void UpdateMatches();

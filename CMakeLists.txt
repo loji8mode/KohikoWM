@@ -19,13 +19,24 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(Xft REQUIRED IMPORTED_TARGET xft fontconfig)
 pkg_check_modules(Imlib2 REQUIRED IMPORTED_TARGET imlib2)
 
+# libpam - LockScreen.cpp's own PAM authentication (see
+# include/Authenticator.h). No pkg-config file on most distros, so
+# this goes through a plain find_library the way the Makefile's -lpam
+# does instead. Checked manually rather than via find_library()'s own
+# REQUIRED (only available since CMake 3.18) to stay compatible with
+# this file's declared cmake_minimum_required(3.16).
+find_library(PAM_LIBRARY NAMES pam)
+if(NOT PAM_LIBRARY)
+    message(FATAL_ERROR "libpam not found - install libpam0g-dev (Debian/Ubuntu) or pam-devel (Fedora)")
+endif()
+
 # --- kohiko: the window manager ------------------------------------------------
 
 file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 
 add_executable(kohiko ${KOHIKO_SOURCES})
 target_include_directories(kohiko PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
-target_link_libraries(kohiko PRIVATE ${X11_LIBRARIES} PkgConfig::Xft PkgConfig::Imlib2)
+target_link_libraries(kohiko PRIVATE ${X11_LIBRARIES} PkgConfig::Xft PkgConfig::Imlib2 ${PAM_LIBRARY})
 target_compile_options(kohiko PRIVATE -Wall -Wextra)
 
 # Multi-monitor geometry via XRandr, enabled only if it's actually

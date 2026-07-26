@@ -8,12 +8,37 @@
 #include <X11/Xlib.h>
 
 #include <cerrno>
+#include <csignal>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/types.h>
 
 namespace Kohiko
 {
+
+namespace
+{
+
+// Set (async-signal-safe: a plain sig_atomic_t, nothing else touched)
+// by HandleTerminationSignal() below; checked once per Run() loop
+// iteration. A file-local flag rather than anything routed through
+// WindowManager/EventLoop instance state, since a signal handler
+// registered via std::signal() can only ever be a plain function
+// pointer - it has no way to reach a particular object instance.
+volatile std::sig_atomic_t g_terminateRequested = 0;
+
+extern "C" void HandleTerminationSignal(int)
+{
+    g_terminateRequested = 1;
+}
+
+}
+
+void EventLoop::InstallSignalHandlers()
+{
+    std::signal(SIGTERM, HandleTerminationSignal);
+    std::signal(SIGINT, HandleTerminationSignal);
+}
 
 EventLoop::EventLoop(
     XConnection& connection,
@@ -31,7 +56,7 @@ void EventLoop::Run()
     Display* display = m_connection.GetDisplay();
     int xfd = m_connection.ConnectionFd();
 
-    while (m_running && m_windowManager.IsRunning())
+    while (m_running && m_windowManager.IsRunning() && !g_terminateRequested)
     {
         // Drain everything Xlib already has buffered before going
         // back to select() - XPending() does a non-blocking read

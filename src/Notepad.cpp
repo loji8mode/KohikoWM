@@ -8,6 +8,7 @@
 #include <X11/keysym.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -47,17 +48,34 @@ Notepad::~Notepad()
         XDestroyWindow(display, m_window);
 }
 
+Rect Notepad::ComputeGeometry(
+    const Rect& monitorGeometry) const
+{
+    Rect geometry;
+    geometry.width  = static_cast<int>(static_cast<float>(monitorGeometry.width)  * m_widthFraction);
+    geometry.height = static_cast<int>(static_cast<float>(monitorGeometry.height) * m_heightFraction);
+    geometry.x = monitorGeometry.x + (monitorGeometry.width  - geometry.width)  / 2;
+    geometry.y = monitorGeometry.y + (monitorGeometry.height - geometry.height) / 2;
+    return geometry;
+}
+
+void Notepad::Reposition(
+    const Rect& monitorGeometry)
+{
+    m_geometry = ComputeGeometry(monitorGeometry);
+
+    if (m_window != 0)
+        m_connection.MoveResizeWindow(m_window, m_geometry);
+}
+
 void Notepad::Configure(
     const Config& config,
     const Rect& monitorGeometry)
 {
-    float widthFraction  = config.GetPercent("notepad.width",  0.4f);
-    float heightFraction = config.GetPercent("notepad.height", 0.5f);
+    m_widthFraction  = config.GetPercent("notepad.width",  0.4f);
+    m_heightFraction = config.GetPercent("notepad.height", 0.5f);
 
-    m_geometry.width  = static_cast<int>(static_cast<float>(monitorGeometry.width)  * widthFraction);
-    m_geometry.height = static_cast<int>(static_cast<float>(monitorGeometry.height) * heightFraction);
-    m_geometry.x = monitorGeometry.x + (monitorGeometry.width  - m_geometry.width)  / 2;
-    m_geometry.y = monitorGeometry.y + (monitorGeometry.height - m_geometry.height) / 2;
+    m_geometry = ComputeGeometry(monitorGeometry);
 
     Display* display = m_connection.GetDisplay();
     int screen = m_connection.Screen();
@@ -197,6 +215,38 @@ bool Notepad::HasContent() const
     return m_window;
 }
 
+std::size_t Notepad::PreviousWordBoundary(
+    std::size_t col) const
+{
+    const std::string& line = m_lines[m_row];
+
+    // Skip any whitespace directly before the cursor, then the word
+    // itself - so Ctrl+Backspace after "foo bar  " (trailing spaces,
+    // cursor at the end) removes the spaces and "bar" in one go, the
+    // same as most editors.
+    while (col > 0 && std::isspace(static_cast<unsigned char>(line[col - 1])))
+        col = Utils::Utf8PrevBoundary(line, col);
+
+    while (col > 0 && !std::isspace(static_cast<unsigned char>(line[col - 1])))
+        col = Utils::Utf8PrevBoundary(line, col);
+
+    return col;
+}
+
+std::size_t Notepad::NextWordBoundary(
+    std::size_t col) const
+{
+    const std::string& line = m_lines[m_row];
+
+    while (col < line.size() && !std::isspace(static_cast<unsigned char>(line[col])))
+        col = Utils::Utf8NextBoundary(line, col);
+
+    while (col < line.size() && std::isspace(static_cast<unsigned char>(line[col])))
+        col = Utils::Utf8NextBoundary(line, col);
+
+    return col;
+}
+
 NotepadResult Notepad::HandleKeyPress(
     const XKeyEvent& event)
 {
@@ -253,7 +303,13 @@ NotepadResult Notepad::HandleKeyPress(
 
         case XK_BackSpace:
 
-            if (m_col > 0)
+            if (m_col > 0 && (event.state & ControlMask))
+            {
+                std::size_t start = PreviousWordBoundary(m_col);
+                m_lines[m_row].erase(start, m_col - start);
+                m_col = start;
+            }
+            else if (m_col > 0)
             {
                 // Erase the whole UTF-8 codepoint before the cursor,
                 // not just its last byte - otherwise a single
@@ -278,7 +334,12 @@ NotepadResult Notepad::HandleKeyPress(
 
         case XK_Delete:
 
-            if (m_col < m_lines[m_row].size())
+            if (m_col < m_lines[m_row].size() && (event.state & ControlMask))
+            {
+                std::size_t end = NextWordBoundary(m_col);
+                m_lines[m_row].erase(m_col, end - m_col);
+            }
+            else if (m_col < m_lines[m_row].size())
             {
                 std::size_t end = Utils::Utf8NextBoundary(m_lines[m_row], m_col);
                 m_lines[m_row].erase(m_col, end - m_col);
@@ -422,22 +483,47 @@ void Notepad::Redraw()
 
     for (std::size_t i = firstVisible; i < m_lines.size() && (i - firstVisible) < maxLines; ++i)
     {
-        std::string text = m_lines[i];
+        int lineTop = baseline + static_cast<int>(i - firstVisible) * lineHeight;
 
-        if (i == m_row && m_caretOn)
-            text.insert(text.begin() + static_cast<long>(m_col), '|');
+        const std::string& text = m_lines[i];
 
-        if (text.empty())
-            continue;
-
-        if (m_xftDraw)
+        if (!text.empty() && m_xftDraw)
         {
             m_font.DrawString(
                 m_xftDraw,
                 padding,
-                baseline + static_cast<int>(i - firstVisible) * lineHeight,
+                lineTop,
                 text,
                 textColor.Get());
+        }
+
+        // Drawn as a solid overlay bar rather than an inline '|'
+        // character inserted into the string above: inserting a
+        // glyph made every other character after the cursor jump
+        // sideways each time the caret blinked on/off, and a thin
+        // text-glyph caret is easy to lose against certain fonts. A
+        // fixed-width filled rectangle in the same foreground color
+        // already used for the text - so it's guaranteed to contrast
+        // with the background the same way the text itself does -
+        // sits still and stays visible regardless of font or blink
+        // state. Positioned by measuring the actual text before the
+        // cursor (TextWidth already walks the same per-character font
+        // fallback DrawString() uses, so this lines up exactly even
+        // with mixed-script text) rather than assuming a fixed
+        // per-character advance, which would drift on any
+        // non-monospace font.
+        if (i == m_row && m_caretOn)
+        {
+            int caretX = padding + m_font.TextWidth(text.substr(0, m_col));
+
+            XFillRectangle(
+                display,
+                m_window,
+                m_gc,
+                caretX,
+                lineTop - m_font.Ascent(),
+                2,
+                m_font.Height());
         }
     }
 

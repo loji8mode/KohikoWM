@@ -752,6 +752,56 @@ bool XConnection::IsFloatingWindowType(::Window window, const XAtoms& atoms)
     return isFloatingType;
 }
 
+bool XConnection::IsDockWindowType(::Window window, const XAtoms& atoms)
+{
+    Atom actualType;
+    int actualFormat = 0;
+    unsigned long itemCount = 0;
+    unsigned long bytesLeft = 0;
+    unsigned char* data = nullptr;
+
+    bool isDock = false;
+
+    if (XGetWindowProperty(
+            m_display, window, atoms.NET_WM_WINDOW_TYPE, 0, 16, False,
+            XA_ATOM, &actualType, &actualFormat, &itemCount, &bytesLeft, &data
+        ) == Success && data)
+    {
+        Atom* types = reinterpret_cast<Atom*>(data);
+
+        for (unsigned long i = 0; i < itemCount; ++i)
+        {
+            if (types[i] == atoms.NET_WM_WINDOW_TYPE_DOCK)
+            {
+                isDock = true;
+                break;
+            }
+        }
+
+        XFree(data);
+    }
+
+    return isDock;
+}
+
+std::vector<::Window> XConnection::QueryChildren(::Window window)
+{
+    std::vector<::Window> children;
+
+    ::Window root = 0;
+    ::Window parent = 0;
+    ::Window* list = nullptr;
+    unsigned int count = 0;
+
+    if (XQueryTree(m_display, window, &root, &parent, &list, &count) && list)
+    {
+        children.assign(list, list + count);
+        XFree(list);
+    }
+
+    return children;
+}
+
 std::string XConnection::LastError() const
 {
     return m_lastError;

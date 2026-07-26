@@ -1,0 +1,30 @@
+#%PAM-1.0
+#
+# Kohiko's lock screen (see include/Authenticator.h and the README's
+# "Native lock screen" section) authenticates against a PAM service
+# named "kohiko" - this file, installed as /etc/pam.d/kohiko.
+#
+# Without it, PAM falls through to /etc/pam.d/other, whose contents
+# vary by distro: Arch/Fedora/RHEL ship a strict deny-everything
+# `other` (the lock screen would show up and run, but no password
+# would ever be accepted); Debian/Ubuntu's default `other` just
+# includes the same common-auth stack a real password would already
+# pass through, which means an *unconfigured* lock screen could still
+# silently accept the right password there. Either way, install this
+# file rather than relying on whatever your distro's `other` happens
+# to do:
+#
+#   sudo cp pam/kohiko /etc/pam.d/kohiko
+#
+# This includes the same system-wide auth/account stack most local
+# login tools (login, sudo, ...) already use, rather than duplicating
+# any actual auth logic here - Arch/Fedora/openSUSE-style distros call
+# that stack "system-auth". Debian/Ubuntu call it "common-auth" /
+# "common-account" instead - if `sudo cp` and unlocking then always
+# fails, swap the two lines below for:
+#
+#   auth    include common-auth
+#   account include common-account
+
+auth    include system-auth
+account include system-auth

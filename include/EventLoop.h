@@ -24,6 +24,16 @@ public:
 
     void Stop();
 
+    // Installs SIGTERM/SIGINT handlers that make Run()'s loop exit
+    // cleanly - the usual way a session manager or `pkill kohiko`
+    // stops a window manager, and, unlike letting the default handler
+    // just kill the process, one that still reaches
+    // WindowManager::Shutdown() (session-restore's save-on-exit, among
+    // other cleanup) instead of skipping it. Called once, from
+    // Application::Run(), alongside the SIGCHLD/SIGPIPE handlers it
+    // already installs.
+    static void InstallSignalHandlers();
+
 private:
 
     XConnection& m_connection;

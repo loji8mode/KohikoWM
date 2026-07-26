@@ -103,6 +103,12 @@ void EventDispatcher::Dispatch(
         m_windowManager.HandleLauncherButtonPress(
             event.xbutton);
     }
+    else if (m_windowManager.HandleBarOrPowerMenuButtonPress(
+        event.xbutton))
+    {
+        // Handled - either the bar's power button, or a click
+        // landing inside the already-open PowerMenu itself.
+    }
     else if (event.xbutton.state & Mod4Mask)
     {
         m_mouse.HandlePress(event.xbutton);

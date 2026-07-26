@@ -18,12 +18,28 @@ enum class CommandType
     Workspace,
     MoveToWorkspace,
     FocusDirection,
+
+    // `move <left|right|up|down>` - swap the focused tiled window
+    // with its neighbor in that direction; see Command::Parse().
+    MoveDirection,
+
+    // `focus next` / `focus prev` - cycle real focus through every
+    // visible window on the current workspace, direction-agnostic;
+    // see Command::Parse().
+    FocusCycle,
+
     Rotate,
     Flip,
     Reload,
     Quit,
     LauncherToggle,
     NotepadToggle,
+
+    // `lock` - shows the native lock screen immediately. See
+    // LockScreen.h; also triggered automatically before Suspend
+    // (see PowerMenu's suspend callback) if lockscreen.lock_on_suspend
+    // is enabled.
+    Lock,
 
     // Multi-monitor: `focusmonitor <left|right|up|down|N>` and
     // `movetomonitor <left|right|up|down|N>` - see Command::Parse()
