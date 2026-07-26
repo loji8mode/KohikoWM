@@ -20,4 +20,31 @@ float ParsePercent(
     float fallback
 );
 
+// Byte offset of the start of the UTF-8 codepoint immediately before
+// `pos` (clamped to 0 if `pos` is already at/before the start). Lets
+// cursor movement, backspace, and delete act on whole characters
+// instead of individual UTF-8 continuation bytes.
+std::size_t Utf8PrevBoundary(
+    const std::string& value,
+    std::size_t pos
+);
+
+// Byte offset of the start of the UTF-8 codepoint immediately after
+// `pos` (clamped to value.size()).
+std::size_t Utf8NextBoundary(
+    const std::string& value,
+    std::size_t pos
+);
+
+// Clamps `pos` to value.size() and then, if that lands inside a
+// multi-byte UTF-8 character (e.g. a column carried over from a
+// different line of different content), backs up to that character's
+// start. Used wherever a byte offset from one string is reused
+// against another string that may be encoded differently at that
+// offset.
+std::size_t Utf8ClampToBoundary(
+    const std::string& value,
+    std::size_t pos
+);
+
 }

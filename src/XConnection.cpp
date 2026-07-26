@@ -6,6 +6,8 @@
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 
+#include <clocale>
+
 namespace Kohiko
 {
 
@@ -22,6 +24,18 @@ XConnection::~XConnection()
 
 bool XConnection::Connect()
 {
+    // Required before any other Xlib call for the UTF-8 side of things
+    // to work at all: Xutf8LookupString/Xutf8DrawString/XCreateFontSet
+    // key off the current locale, and without this the process stays
+    // in the "C" locale regardless of the user's actual LANG/LC_*
+    // environment, which silently breaks multi-byte text input,
+    // rendering, and font-set selection. setlocale(..., "") pulls the
+    // locale from the environment; XSetLocaleModifiers("") does the
+    // same for the X input-method modifiers, and both must happen
+    // before XOpenDisplay().
+    std::setlocale(LC_ALL, "");
+    XSetLocaleModifiers("");
+
     m_display = XOpenDisplay(nullptr);
 
     if (!m_display)

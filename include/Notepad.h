@@ -83,7 +83,10 @@ private:
 
     ::Window m_window = 0;
     GC m_gc = nullptr;
-    XFontStruct* m_font = nullptr;
+    XFontSet m_fontSet = nullptr;
+
+    XIM m_xim = nullptr;
+    XIC m_xic = nullptr;
 
     Rect m_geometry;
     bool m_open = false;

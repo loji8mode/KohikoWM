@@ -1,10 +1,18 @@
 #pragma once
 
+#include <filesystem>
+
 #include "Types.h"
 
 #include <X11/Xlib.h>
 
+#include <unordered_map>
+
 #include <string>
+
+#include <string>
+
+#include <vector>
 
 namespace Kohiko
 {
@@ -34,6 +42,25 @@ enum class LauncherResult
 // ever being the reason Kohiko's global hotkeys stop responding - the
 // exact failure mode the Super+Q hardening in WindowManager::Manage()
 // guards against.
+
+struct LauncherEntry
+{
+    std::string name;
+    std::string desktopId;
+    std::string exec;
+    std::string icon;
+    std::string iconPath;
+
+    Pixmap iconPixmap = 0;
+};
+
+struct FileEntry
+{
+    std::string name;
+    std::string path;
+    bool isDirectory = false;
+};
+
 class Launcher
 {
 public:
@@ -62,20 +89,33 @@ public:
 
     // The currently typed line - only meaningful while IsOpen().
     const std::string& Query() const;
+    std::string SelectedCommand();
+    std::string SelectedPath();
+bool SelectedIsFile() const;
 
     LauncherResult HandleKeyPress(
         const XKeyEvent& event
     );
 
     void HandleExpose();
-
+    void HandleButtonPress(const XButtonEvent& event);
     // Called on Kohiko's ~1s idle heartbeat while open, to blink the
     // caret - cheap enough not to need a dedicated timer.
     void Blink();
+    void ReloadDesktopEntries();
 
 private:
 
     void Redraw();
+    void UpdateMatches();
+    void LoadDesktopEntries();
+    void BuildFileIndex();
+
+    Pixmap LoadIcon(
+        const std::string& path);
+
+    std::string FindIconPath(
+        const std::string& iconName);
 
 private:
 
@@ -83,7 +123,10 @@ private:
 
     ::Window m_window = 0;
     GC m_gc = nullptr;
-    XFontStruct* m_font = nullptr;
+    XFontSet m_fontSet = nullptr;
+
+    XIM m_xim = nullptr;
+    XIC m_xic = nullptr;
 
     Rect m_geometry;
     bool m_open = false;
@@ -96,7 +139,36 @@ private:
     unsigned long m_foregroundPixel = 0;
     unsigned long m_borderPixel = 0;
     unsigned long m_placeholderPixel = 0;
+std::vector<LauncherEntry> m_entries;
+bool m_entriesLoaded = false;
+enum class MatchType
+{
+    Application,
+    File
+};
 
+struct MatchResult
+{
+    MatchType type;
+    std::size_t index;
+    int score;
+};
+
+std::vector<MatchResult> m_matches;
+std::size_t m_selectedIndex = 0;
+std::size_t m_scrollOffset = 0;
+std::unordered_map<std::string, Pixmap> m_iconCache;
+std::unordered_map<std::string, int> m_launchCounts;
+std::vector<FileEntry> m_files;
+Pixmap m_folderIconPixmap = 0;
+Pixmap m_fileIconPixmap = 0;
+void LoadLaunchHistory();
+void SaveLaunchHistory();
+
+int CalculateFinalScore(
+    const LauncherEntry& app,
+    int baseScore) const;
+int VisibleRows() const;
 };
 
 }

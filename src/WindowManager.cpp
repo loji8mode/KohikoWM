@@ -53,12 +53,20 @@ void WindowManager::Initialize()
     m_bar.Configure(m_config, m_monitors.Primary().Geometry());
     m_bar.Show();
 
+    m_tray.Initialize(m_connection, m_bar.WindowId());
+    m_bar.AttachSystemTray(&m_tray);
+
     m_launcher.Configure(m_config, m_monitors.Primary().Geometry());
     m_notepad.Configure(m_config, m_monitors.Primary().Geometry());
     m_bar.SetNotepadActive(m_notepad.HasContent());
 
     m_keyboard.Configure(m_config);
     m_mouse.Configure(m_config);
+
+     m_fileManager =
+    m_config.GetString(
+        "launcher.file_manager",
+        "pcmanfm");
 
     m_ipc.Start(
         IpcSocketPath(),
@@ -68,11 +76,14 @@ void WindowManager::Initialize()
         });
 
     Arrange();
+
+
 }
 
 void WindowManager::Shutdown()
 {
     m_ipc.Stop();
+    m_tray.Shutdown();
     m_bar.Hide();
 }
 
@@ -166,6 +177,8 @@ void WindowManager::HandleDestroyNotify(const XDestroyWindowEvent& event)
 {
     if (m_repository.Contains(event.window))
         Unmanage(event.window);
+
+    m_tray.HandleWindowDestroyed(event.window);
 }
 
 void WindowManager::HandleEnterNotify(const XCrossingEvent& event)
@@ -251,6 +264,11 @@ void WindowManager::HandleExpose(const XExposeEvent& event)
         m_launcher.HandleExpose();
     else if (event.window == m_notepad.WindowId())
         m_notepad.HandleExpose();
+}
+
+void WindowManager::HandleClientMessage(const XClientMessageEvent& event)
+{
+    m_tray.HandleClientMessage(event);
 }
 
 bool WindowManager::HandleModalKeyPress(const XKeyEvent& event)
@@ -1039,6 +1057,11 @@ void WindowManager::ReloadConfig()
     m_keyboard.Configure(m_config);
     m_mouse.Configure(m_config);
 
+    m_fileManager =
+        m_config.GetString(
+            "launcher.file_manager",
+            "pcmanfm");
+
     Arrange();
 }
 
@@ -1065,12 +1088,39 @@ void WindowManager::CloseLauncher(bool run)
     if (!m_launcher.IsOpen())
         return;
 
-    std::string command = m_launcher.Query();
+    bool isFile =
+        m_launcher.SelectedIsFile();
+
+    std::string command =
+        m_launcher.SelectedCommand();
+
+    std::string path =
+        m_launcher.SelectedPath();
 
     m_launcher.Close();
 
-    if (run && !command.empty())
-        Process::Spawn(command, m_connection.DisplayName());
+    if (run)
+    {
+        if (isFile)
+{
+    namespace fs = std::filesystem;
+
+    std::string folder =
+        fs::path(path)
+            .parent_path()
+            .string();
+
+    Process::Spawn(
+        m_fileManager + " \"" + folder + "\"",
+        m_connection.DisplayName());
+}
+        else if (!command.empty())
+        {
+            Process::Spawn(
+                command,
+                m_connection.DisplayName());
+        }
+    }
 
     RestoreFocusAfterModal();
 }
@@ -1284,6 +1334,11 @@ std::string WindowManager::DumpActiveWindowJson() const
         << "}";
 
     return out.str();
+}
+
+::Window WindowManager::LauncherWindowId() const
+{
+    return m_launcher.WindowId();
 }
 
 }

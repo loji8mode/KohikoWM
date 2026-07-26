@@ -1,6 +1,7 @@
 #include "Bar.h"
 
 #include "Config.h"
+#include "SystemTray.h"
 #include "XConnection.h"
 
 #include <cstdlib>
@@ -24,8 +25,8 @@ Bar::~Bar()
     if (!display)
         return;
 
-    if (m_font)
-        XFreeFont(display, m_font);
+    if (m_fontSet)
+        XFreeFontSet(display, m_fontSet);
 
     if (m_gc)
         XFreeGC(display, m_gc);
@@ -69,13 +70,35 @@ void Bar::Configure(
 
         m_gc = XCreateGC(display, m_window, 0, nullptr);
 
-        m_font = XLoadQueryFont(display, "-*-fixed-medium-r-*-*-13-*-*-*-*-*-*-*");
+        char** missing = nullptr;
+int nmissing = 0;
+char* def = nullptr;
 
-        if (!m_font)
-            m_font = XLoadQueryFont(display, "fixed");
+// XCreateFontSet takes classic comma-separated XLFD base font
+// names, not fontconfig pattern syntax - "monospace:size=13" is
+// fontconfig-only syntax and never matches an XLFD font, which is
+// why m_fontSet stayed null and no text ever drew. "fixed" is the
+// XLFD alias every X11 install ships (it's xterm's own default
+// font), so it's included in both lists as a guaranteed-to-match
+// fallback.
+m_fontSet = XCreateFontSet(
+    display,
+    "-*-fixed-medium-r-normal--13-*-*-*-*-*-*-*,-*-*-medium-r-normal--13-*-*-*-*-*-*-*,fixed",
+    &missing,
+    &nmissing,
+    &def);
 
-        if (m_font)
-            XSetFont(display, m_gc, m_font->fid);
+if (!m_fontSet)
+{
+    m_fontSet = XCreateFontSet(
+        display,
+        "-*-helvetica-medium-r-normal--12-*-*-*-*-*-*-*,-*-*-medium-r-normal--12-*-*-*-*-*-*-*,fixed",
+        &missing,
+        &nmissing,
+        &def);
+}
+
+         
     }
     else
     {
@@ -152,6 +175,12 @@ void Bar::SetNotepadActive(
     m_notepadActive = active;
 }
 
+void Bar::AttachSystemTray(
+    SystemTray* tray)
+{
+    m_tray = tray;
+}
+
 int Bar::Height() const
 {
     return m_height;
@@ -166,7 +195,7 @@ void Bar::Redraw()
 
     XClearWindow(display, m_window);
 
-    int baseline = m_height / 2 + (m_font ? (m_font->ascent / 2) : 5);
+    int baseline = m_height / 2 + 5;
     int x = 10;
 
     for (int i = 1; i <= m_workspaceCount; ++i)
@@ -193,6 +222,17 @@ void Bar::Redraw()
     if (!m_title.empty())
         DrawText(x + 16, baseline, m_title, m_foregroundPixel);
 
+    int trayWidth = 0;
+
+    if (m_tray)
+    {
+        m_tray->Reposition(m_geometry.width, m_height);
+        trayWidth = m_tray->Width();
+
+        if (trayWidth > 0)
+            trayWidth += 12;
+    }
+
     std::time_t now = std::time(nullptr);
     std::tm local{};
     localtime_r(&now, &local);
@@ -201,9 +241,28 @@ void Bar::Redraw()
     std::strftime(clockText, sizeof(clockText), "%H:%M:%S", &local);
 
     int clockLen = static_cast<int>(std::strlen(clockText));
-    int clockWidth = m_font ? XTextWidth(m_font, clockText, clockLen) : (clockLen * 8);
+    int clockWidth;
 
-    DrawText(m_geometry.width - clockWidth - 12, baseline, clockText, m_foregroundPixel);
+if (m_fontSet)
+{
+    XRectangle ink;
+    XRectangle logical;
+
+    Xutf8TextExtents(
+        m_fontSet,
+        clockText,
+        clockLen,
+        &ink,
+        &logical);
+
+    clockWidth = logical.width;
+}
+else
+{
+    clockWidth = clockLen * 8;
+}
+
+    DrawText(m_geometry.width - clockWidth - 12 - trayWidth, baseline, clockText, m_foregroundPixel);
 
     XFlush(display);
 }
@@ -220,7 +279,22 @@ void Bar::DrawText(
     Display* display = m_connection.GetDisplay();
 
     XSetForeground(display, m_gc, color);
-    XDrawString(display, m_window, m_gc, x, baseline, text.c_str(), static_cast<int>(text.size()));
+
+    // XCreateFontSet can legitimately return null (e.g. no XLFD font
+    // matches the requested charsets on this X server) - Xutf8DrawString
+    // requires a real fontset, so skip drawing rather than passing it null.
+    if (!m_fontSet)
+        return;
+
+    Xutf8DrawString(
+    display,
+    m_window,
+    m_fontSet,
+    m_gc,
+    x,
+    baseline,
+    text.c_str(),
+    static_cast<int>(text.size()));
 }
 
 }

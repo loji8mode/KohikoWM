@@ -1,18 +1,19 @@
 # Changelog
 
-## Version 0.3.0
+## Version 0.4.0
 
-Release date: 2026-07-11
+Release date: 2026-07-12
 
 ### Added
-- Native launcher (`Super+D`): a small centered input box that runs a typed command via `/bin/sh -c` on `Enter`, replacing the previous default of shelling out to `dmenu_run`. `Escape` or a click outside the box dismisses it without running anything. Implemented in new `Launcher.h`/`Launcher.cpp`.
-- Native notepad (`Super+N`): a small scratch-notes box with free-form multi-line text (typing, `Enter`, `Backspace`/`Delete`, arrow keys, `Home`/`End`), auto-saved to and restored from `~/.config/kohiko/notepad.txt`. Implemented in new `Notepad.h`/`Notepad.cpp`. The bar shows a `[N]` indicator when the notepad has saved content or is open, matching the existing `[S]` scratchpad indicator style.
-- `Animator`: a small rect-tweening stepper that animates a swapped window sliding into its new tile over a short duration, rather than snapping instantly. Used exclusively by the `Super+LMB` swap gesture.
-- `BSPSplit::Subdivide()`: shared math for splitting a rect into two child rects, used by both `LayoutEngine` (real layout) and the new capacity check below.
-- `BSPTree::HasSpaceForAnotherWindow()`: a non-mutating check for whether inserting a new window would shrink any resulting tile below `general.min_tile_width`/`general.min_tile_height`.
-- New config keys: `general.min_tile_width`, `general.min_tile_height`, `notepad.width`, `notepad.height`.
+- Launcher (`Super+D`) rewritten into a full application launcher: scans `.desktop` entries and builds a file index of `$HOME`, renders icons via Imlib2 (with GTK used for icon-theme lookup), fuzzy-matches typed text against application names with a subsequence matcher, and ranks results using a new hardcoded application popularity/penalty table (`AppRatings.h`). Adds launch history tracking (persisted to `/tmp/kohiko_launcher_history`) so frequently-used entries rank higher. Text entry now goes through X Input Method (XIM/XIC) with a multi-byte font set, replacing plain ASCII key handling, and gains a results list navigable by keyboard or mouse, with icons and scrolling.
+- System tray support in the bar, implementing the freedesktop System Tray Protocol (`SystemTray.h`/`.cpp`): Kohiko takes ownership of the `_NET_SYSTEM_TRAY_S<screen>` selection and docks icon-bearing applets (NetworkManager, Bluetooth, volume, etc.) left of the clock.
+- `scripts/install-arch.sh`: one-command Arch Linux install script — installs pacman dependencies, builds, installs, and registers Kohiko as a session (`.desktop` entry and `~/.xinitrc`, without overwriting an existing setup).
+- `Print` key binding to run `exec.screenshot` (defaults to `flameshot gui`).
+- `Utils::Utf8PrevBoundary`, `Utf8NextBoundary`, `Utf8ClampToBoundary`: UTF-8-aware cursor movement helpers, supporting proper multi-byte text editing in the new IME-based launcher input.
 
 ### Changed
-- The `Super+LMB` swap gesture no longer swaps live on hover: a dragged window now detaches and follows the cursor exactly, with the tiled window currently under the cursor highlighted as a swap preview; releasing over a window swaps the two (animated via `Animator`), and releasing over empty space (or the original window) slides the dragged window back to its original tile.
-- `Super+RMB` resize now collapses a backlog of queued mouse-motion events down to the latest one per update, instead of processing every queued motion event, to avoid lag under a fast or laggy pointer.
-- When there is no room to tile a new window without violating `general.min_tile_width`/`general.min_tile_height`, Kohiko now falls back to opening it on another workspace, or floating if no workspace has room, instead of forcing an undersized tile.
+- `LICENSE` updated to the full standard MIT license text (previously missing the "subject to the following conditions" and liability disclaimer clauses).
+- Build files (`CMakeLists.txt`/`Makefile`) updated for the new GTK3 and Imlib2 dependencies.
+
+### Notes
+- This release significantly increases Kohiko's dependency footprint (GTK3, Imlib2) purely for the launcher's icon handling; later releases (0.15.0) replace the GTK3 dependency with a custom icon-theme lookup implementation.

@@ -12,6 +12,7 @@
 #include "MouseManager.h"
 #include "Notepad.h"
 #include "Scratchpad.h"
+#include "SystemTray.h"
 #include "Types.h"
 #include "WindowRepository.h"
 #include "WorkspaceManager.h"
@@ -77,6 +78,9 @@ public:
     void HandlePropertyNotify(const XPropertyEvent& event);
     void HandleButtonPressOnClient(const XButtonEvent& event);
     void HandleExpose(const XExposeEvent& event);
+    void HandleClientMessage(const XClientMessageEvent& event);
+    void HandleLauncherButtonPress(const XButtonEvent& event);
+    ::Window LauncherWindowId() const;
 
     // Gives the Launcher/Notepad first refusal on every KeyPress while
     // either is open, returning true if it consumed the event (which
@@ -108,6 +112,7 @@ public:
     // --- IPCServer-facing API ------------------------------------------------
 
     std::string HandleIpcCommand(const std::string& request);
+    std::string m_fileManager;
 
 private:
 
@@ -198,6 +203,7 @@ private:
 
     IPCServer m_ipc;
     Bar m_bar;
+    SystemTray m_tray;
     Launcher m_launcher;
     Notepad m_notepad;
     Animator m_animator;

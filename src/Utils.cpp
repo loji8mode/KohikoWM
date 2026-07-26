@@ -55,4 +55,58 @@ float ParsePercent(
     }
 }
 
+namespace
+{
+
+// UTF-8 continuation bytes all match binary 10xxxxxx - everything
+// else (ASCII bytes and multi-byte lead bytes) starts a new codepoint.
+bool IsUtf8Continuation(unsigned char c)
+{
+    return (c & 0xC0) == 0x80;
+}
+
+}
+
+std::size_t Utf8PrevBoundary(
+    const std::string& value,
+    std::size_t pos)
+{
+    if (pos == 0)
+        return 0;
+
+    --pos;
+
+    while (pos > 0 && IsUtf8Continuation(static_cast<unsigned char>(value[pos])))
+        --pos;
+
+    return pos;
+}
+
+std::size_t Utf8NextBoundary(
+    const std::string& value,
+    std::size_t pos)
+{
+    if (pos >= value.size())
+        return value.size();
+
+    ++pos;
+
+    while (pos < value.size() && IsUtf8Continuation(static_cast<unsigned char>(value[pos])))
+        ++pos;
+
+    return pos;
+}
+
+std::size_t Utf8ClampToBoundary(
+    const std::string& value,
+    std::size_t pos)
+{
+    pos = std::min(pos, value.size());
+
+    while (pos > 0 && IsUtf8Continuation(static_cast<unsigned char>(value[pos])))
+        --pos;
+
+    return pos;
+}
+
 }

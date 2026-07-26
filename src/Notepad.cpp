@@ -1,6 +1,7 @@
 #include "Notepad.h"
 
 #include "Config.h"
+#include "Utils.h"
 #include "XConnection.h"
 
 #include <X11/Xutil.h>
@@ -28,8 +29,14 @@ Notepad::~Notepad()
     if (!display)
         return;
 
-    if (m_font)
-        XFreeFont(display, m_font);
+    if (m_xic)
+        XDestroyIC(m_xic);
+
+    if (m_xim)
+        XCloseIM(m_xim);
+
+    if (m_fontSet)
+        XFreeFontSet(display, m_fontSet);
 
     if (m_gc)
         XFreeGC(display, m_gc);
@@ -84,13 +91,51 @@ void Notepad::Configure(
 
         m_gc = XCreateGC(display, m_window, 0, nullptr);
 
-        m_font = XLoadQueryFont(display, "-*-fixed-medium-r-*-*-13-*-*-*-*-*-*-*");
+        char** missing = nullptr;
+int nmissing = 0;
+char* def = nullptr;
 
-        if (!m_font)
-            m_font = XLoadQueryFont(display, "fixed");
+// XCreateFontSet takes classic comma-separated XLFD base font
+// names, not fontconfig pattern syntax - "monospace:size=13" is
+// fontconfig-only syntax and never matches an XLFD font, which is
+// why m_fontSet stayed null and no text ever drew. "fixed" is the
+// XLFD alias every X11 install ships (it's xterm's own default
+// font), so it's included in both lists as a guaranteed-to-match
+// fallback.
+m_fontSet = XCreateFontSet(
+    display,
+    "-*-fixed-medium-r-normal--13-*-*-*-*-*-*-*,-*-*-medium-r-normal--13-*-*-*-*-*-*-*,fixed",
+    &missing,
+    &nmissing,
+    &def);
 
-        if (m_font)
-            XSetFont(display, m_gc, m_font->fid);
+if (!m_fontSet)
+{
+    m_fontSet = XCreateFontSet(
+        display,
+        "-*-helvetica-medium-r-normal--12-*-*-*-*-*-*-*,-*-*-medium-r-normal--12-*-*-*-*-*-*-*,fixed",
+        &missing,
+        &nmissing,
+        &def);
+}
+
+        // Xutf8LookupString (used in HandleKeyPress below) needs an
+        // actual input method + input context - without this m_xic
+        // stays null and every keypress would either crash or have to
+        // be special-cased, and dead-key/compose sequences for
+        // non-ASCII input wouldn't work at all.
+        m_xim = XOpenIM(display, nullptr, nullptr, nullptr);
+
+        if (m_xim)
+        {
+            m_xic = XCreateIC(
+                m_xim,
+                XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+                XNClientWindow, m_window,
+                XNFocusWindow, m_window,
+                nullptr);
+        }
+
     }
     else
     {
@@ -173,8 +218,33 @@ NotepadResult Notepad::HandleKeyPress(
     char buffer[32];
     KeySym keysym = NoSymbol;
 
-    XKeyEvent mutableEvent = event; // XLookupString wants a non-const pointer
-    int len = XLookupString(&mutableEvent, buffer, sizeof(buffer) - 1, &keysym, nullptr);
+    XKeyEvent mutableEvent = event; // Xutf8LookupString wants a non-const pointer
+    Status status;
+
+    int len;
+
+    if (m_xic)
+    {
+        len = Xutf8LookupString(
+            m_xic,
+            &mutableEvent,
+            buffer,
+            sizeof(buffer) - 1,
+            &keysym,
+            &status);
+    }
+    else
+    {
+        // No input method could be opened (e.g. none configured on
+        // this system) - fall back to plain, non-UTF-8 lookup rather
+        // than passing a null XIC to Xutf8LookupString.
+        len = XLookupString(
+            &mutableEvent,
+            buffer,
+            sizeof(buffer) - 1,
+            &keysym,
+            nullptr);
+    }
 
     if (len < 0)
         len = 0;
@@ -200,8 +270,14 @@ NotepadResult Notepad::HandleKeyPress(
 
             if (m_col > 0)
             {
-                m_lines[m_row].erase(m_col - 1, 1);
-                --m_col;
+                // Erase the whole UTF-8 codepoint before the cursor,
+                // not just its last byte - otherwise a single
+                // backspace on a multi-byte character (e.g. Cyrillic,
+                // accented Latin) leaves the line as invalid UTF-8 and
+                // takes 2-4 presses to actually remove.
+                std::size_t start = Utils::Utf8PrevBoundary(m_lines[m_row], m_col);
+                m_lines[m_row].erase(start, m_col - start);
+                m_col = start;
             }
             else if (m_row > 0)
             {
@@ -219,7 +295,8 @@ NotepadResult Notepad::HandleKeyPress(
 
             if (m_col < m_lines[m_row].size())
             {
-                m_lines[m_row].erase(m_col, 1);
+                std::size_t end = Utils::Utf8NextBoundary(m_lines[m_row], m_col);
+                m_lines[m_row].erase(m_col, end - m_col);
             }
             else if (m_row + 1 < m_lines.size())
             {
@@ -234,7 +311,7 @@ NotepadResult Notepad::HandleKeyPress(
 
             if (m_col > 0)
             {
-                --m_col;
+                m_col = Utils::Utf8PrevBoundary(m_lines[m_row], m_col);
             }
             else if (m_row > 0)
             {
@@ -249,7 +326,7 @@ NotepadResult Notepad::HandleKeyPress(
 
             if (m_col < m_lines[m_row].size())
             {
-                ++m_col;
+                m_col = Utils::Utf8NextBoundary(m_lines[m_row], m_col);
             }
             else if (m_row + 1 < m_lines.size())
             {
@@ -265,7 +342,7 @@ NotepadResult Notepad::HandleKeyPress(
             if (m_row > 0)
             {
                 --m_row;
-                m_col = std::min(m_col, m_lines[m_row].size());
+                m_col = Utils::Utf8ClampToBoundary(m_lines[m_row], m_col);
             }
 
             Redraw();
@@ -276,7 +353,7 @@ NotepadResult Notepad::HandleKeyPress(
             if (m_row + 1 < m_lines.size())
             {
                 ++m_row;
-                m_col = std::min(m_col, m_lines[m_row].size());
+                m_col = Utils::Utf8ClampToBoundary(m_lines[m_row], m_col);
             }
 
             Redraw();
@@ -335,8 +412,8 @@ void Notepad::Redraw()
     XClearWindow(display, m_window);
 
     int padding = 12;
-    int lineHeight = m_font ? (m_font->ascent + m_font->descent + 4) : 18;
-    int baseline = padding + (m_font ? m_font->ascent : 12);
+    int lineHeight = 22;
+    int baseline = padding + 16;
 
     XSetForeground(display, m_gc, m_foregroundPixel);
 
@@ -362,10 +439,17 @@ void Notepad::Redraw()
         if (text.empty())
             continue;
 
-        XDrawString(
-            display, m_window, m_gc,
-            padding, baseline + static_cast<int>(i - firstVisible) * lineHeight,
-            text.c_str(), static_cast<int>(text.size()));
+        // XCreateFontSet can legitimately return null (e.g. no XLFD
+        // font matches the requested charsets on this X server) -
+        // Xutf8DrawString requires a real fontset, so skip drawing
+        // rather than passing it null.
+        if (m_fontSet)
+        {
+            Xutf8DrawString(
+                display, m_window,  m_fontSet, m_gc,
+                padding, baseline + static_cast<int>(i - firstVisible) * lineHeight,
+                text.c_str(), static_cast<int>(text.size()));
+        }
     }
 
     XFlush(display);

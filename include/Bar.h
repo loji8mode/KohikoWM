@@ -11,6 +11,7 @@ namespace Kohiko
 
 class XConnection;
 class Config;
+class SystemTray;
 
 // A minimal always-on-top status bar: workspace list, active window
 // title, a scratchpad indicator, and a clock. Drawn with plain core
@@ -64,6 +65,15 @@ public:
         bool active
     );
 
+    // Wires up the system tray (see SystemTray.h) so Redraw() can
+    // reposition its container flush against the right edge and leave
+    // room for it when placing the clock. Kohiko has exactly one tray
+    // for the lifetime of the process, so this is meant to be called
+    // once, right after both Bar and SystemTray are constructed.
+    void AttachSystemTray(
+        SystemTray* tray
+    );
+
     // Redraws everything, including the clock. Cheap enough to call
     // on every relevant WindowManager event plus once a second.
     void Redraw();
@@ -85,7 +95,7 @@ private:
 
     ::Window m_window = 0;
     GC m_gc = nullptr;
-    XFontStruct* m_font = nullptr;
+    XFontSet m_fontSet = nullptr;
 
     Rect m_geometry;
     int m_height = 26;
@@ -97,6 +107,8 @@ private:
     std::string m_title;
     bool m_scratchpadActive = false;
     bool m_notepadActive = false;
+
+    SystemTray* m_tray = nullptr;
 
     unsigned long m_backgroundPixel = 0;
     unsigned long m_foregroundPixel = 0;

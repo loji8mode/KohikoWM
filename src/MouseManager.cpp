@@ -134,6 +134,13 @@ void MouseManager::HandleRelease(
     m_dragWindow = nullptr;
 }
 
+void WindowManager::HandleLauncherButtonPress(
+    const XButtonEvent& event)
+{
+    if (event.window == m_launcher.WindowId())
+        m_launcher.HandleButtonPress(event);
+}
+
 bool MouseManager::Matches(
     const Binding& binding,
     unsigned int state,

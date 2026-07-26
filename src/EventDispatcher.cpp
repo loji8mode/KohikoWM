@@ -51,6 +51,10 @@ void EventDispatcher::Dispatch(
             m_windowManager.HandleExpose(event.xexpose);
             break;
 
+        case ClientMessage:
+            m_windowManager.HandleClientMessage(event.xclient);
+            break;
+
         case KeyPress:
 
             // The Launcher/Notepad get first refusal on every key
@@ -66,16 +70,23 @@ void EventDispatcher::Dispatch(
 
         case ButtonPress:
 
-            // Modifier state (not which window reports the event) is
-            // what actually distinguishes the two grabs: Super-held
-            // clicks are one of MouseManager's root-level drag grabs,
-            // everything else is the per-client click-to-focus grab.
-            if (event.xbutton.state & Mod4Mask)
-                m_mouse.HandlePress(event.xbutton);
-            else
-                m_windowManager.HandleButtonPressOnClient(event.xbutton);
+    if (event.xbutton.window ==
+        m_windowManager.LauncherWindowId())
+    {
+        m_windowManager.HandleLauncherButtonPress(
+            event.xbutton);
+    }
+    else if (event.xbutton.state & Mod4Mask)
+    {
+        m_mouse.HandlePress(event.xbutton);
+    }
+    else
+    {
+        m_windowManager.HandleButtonPressOnClient(
+            event.xbutton);
+    }
 
-            break;
+    break;
 
         case ButtonRelease:
             m_mouse.HandleRelease(event.xbutton);

@@ -4,8 +4,12 @@
 
 CXX      ?= g++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra
+
 INCLUDES := -Iinclude
-LIBS     := -lX11
+INCLUDES += $(shell pkg-config --cflags gtk+-3.0)
+
+LIBS := -lX11 -lImlib2
+LIBS += $(shell pkg-config --libs gtk+-3.0)
 
 SRC := $(wildcard src/*.cpp)
 OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC))

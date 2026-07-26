@@ -68,6 +68,22 @@ XRandr-based monitor detection (`KOHIKO_HAVE_XRANDR`); if it isn't, Kohiko
 falls back to treating the whole X display as one monitor, which is
 correct for the common single-monitor case regardless.
 
+### Arch Linux: one-command install
+
+```sh
+scripts/install-arch.sh
+```
+
+Installs every pacman dependency Kohiko needs (`base-devel`, `libx11`,
+`libxrandr`, `imlib2`, `gtk3`, `xorg-fonts-misc`, `xorg-server`), builds
+with `make -j$(nproc)`, runs `sudo make install`, drops a default config
+in `~/.config/kohiko` if you don't have one yet, and registers Kohiko as
+a session: an `xsessions` `.desktop` entry so it shows up in your display
+manager's session list (SDDM/GDM/LightDM/...), plus a `~/.xinitrc` that
+starts it - but only if you don't already have one, so it never
+overwrites an existing setup. Run it as your normal user; it calls `sudo`
+itself for the steps that need it.
+
 ## Running it
 
 Kohiko is a normal X11 window manager, so it's started the same way as any
@@ -124,6 +140,7 @@ notepad.width=40%
 notepad.height=50%
 
 exec.terminal=xterm              # referenced from `bind=... exec terminal`
+exec.screenshot=flameshot gui    # referenced from `bind=Print exec screenshot`
 
 mouse.swap=SUPER+BTN1
 mouse.resize=SUPER+BTN3
@@ -148,6 +165,7 @@ Reload after editing without restarting: `kohikoctl reload` (also bound to
 | `Super+F1`             | toggle scratchpad                          |
 | `Super+R`              | rotate the focused split (vertical <-> horizontal) |
 | `Super+Shift+R`        | flip the focused split (mirror the two panes) |
+| `Print`                | screenshot via `exec.screenshot` (flameshot by default) |
 | `Super+H/J/K/L`        | move focus left/down/up/right             |
 | `Super+1..0`           | switch to workspace 1-10                  |
 | `Super+Shift+1..0`     | send the focused window to workspace 1-10 |
@@ -156,6 +174,15 @@ Reload after editing without restarting: `kohikoctl reload` (also bound to
 
 All of the above are just entries in `kohiko.conf` - remove, remap, or add
 to them freely; nothing is hardcoded.
+
+## System tray
+
+The bar implements the freedesktop System Tray Protocol, so applets that
+dock an icon there (NetworkManager, Bluetooth, volume, etc.) show up at
+the right edge of the bar, just left of the clock, the same way they
+would in any other status bar. No configuration needed - Kohiko takes
+ownership of the tray selection on startup and lays out whatever docks
+itself with it, left to right, in the order it arrived.
 
 ## The mouse: swap and resize
 
