@@ -5,6 +5,7 @@
 //   kohikoctl dispatch workspace 3
 //   kohikoctl clients | monitors | activewindow | tree
 //   kohikoctl reload
+//   kohikoctl reloadlauncher
 //   kohikoctl quit
 
 #include "IpcPath.h"
@@ -31,6 +32,7 @@ void PrintUsage()
         "  kohikoctl activewindow         JSON info for the focused window\n"
         "  kohikoctl tree                 JSON dump of the current workspace's BSP tree\n"
         "  kohikoctl reload               re-read the config file\n"
+        "  kohikoctl reloadlauncher       re-scan applications/files for the native launcher\n"
         "  kohikoctl quit                 ask kohiko to exit\n"
     );
 }

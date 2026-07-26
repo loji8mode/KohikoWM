@@ -176,6 +176,12 @@ private:
     // strip regardless of what TryTile()'s capacity check approved.
     void RefreshWorkspaceGeometry(int workspaceId);
 
+    // Keeps the root window's _NET_CLIENT_LIST in sync with
+    // m_repository - called from Manage()/Unmanage() every time a
+    // window starts or stops being managed, so EWMH-aware tools (see
+    // XConnection::InitializeEwmhSupport()) always see the current set.
+    void RefreshClientList();
+
     Rect CenteredFloatingRect(float widthFraction, float heightFraction);
     unsigned long ParseColor(const std::string& key, const std::string& fallback) const;
 
@@ -191,6 +197,14 @@ private:
 
     XAtoms m_atoms;
     CursorManager m_cursor;
+
+    // The invisible window WindowManager::Initialize() creates via
+    // XConnection::InitializeEwmhSupport() to advertise EWMH support -
+    // see that method's comment for why tools like flameshot check it.
+    // Kohiko never touches it again after startup, but keeps it around
+    // for the lifetime of the connection rather than letting it dangle.
+    ::Window m_ewmhCheckWindow = 0;
+
     WindowRepository m_repository;
     WorkspaceManager m_workspaces;
     MonitorManager m_monitors;

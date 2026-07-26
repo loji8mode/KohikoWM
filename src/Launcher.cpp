@@ -205,6 +205,12 @@ Launcher::~Launcher()
     if (m_fileIconPixmap)
         XFreePixmap(display, m_fileIconPixmap);
 
+    if (m_folderIconMask)
+        XFreePixmap(display, m_folderIconMask);
+
+    if (m_fileIconMask)
+        XFreePixmap(display, m_fileIconMask);
+
     if (m_xic)
         XDestroyIC(m_xic);
 
@@ -830,6 +836,15 @@ else
 
     if (app.iconPixmap)
     {
+        int iconX = 12;
+        int iconY = drawY - 14;
+
+        if (app.iconMask)
+        {
+            XSetClipMask(display, m_gc, app.iconMask);
+            XSetClipOrigin(display, m_gc, iconX, iconY);
+        }
+
         XCopyArea(
             display,
             app.iconPixmap,
@@ -839,8 +854,11 @@ else
             0,
             20,
             20,
-            12,
-            drawY - 14);
+            iconX,
+            iconY);
+
+        if (app.iconMask)
+            XSetClipMask(display, m_gc, None);
     }
 }
 else
@@ -850,8 +868,22 @@ else
         m_folderIconPixmap :
         m_fileIconPixmap;
 
+    Pixmap fileTypeMask =
+        m_files[match.index].isDirectory ?
+        m_folderIconMask :
+        m_fileIconMask;
+
     if (fileTypeIcon)
     {
+        int iconX = 12;
+        int iconY = drawY - 14;
+
+        if (fileTypeMask)
+        {
+            XSetClipMask(display, m_gc, fileTypeMask);
+            XSetClipOrigin(display, m_gc, iconX, iconY);
+        }
+
         XCopyArea(
             display,
             fileTypeIcon,
@@ -861,8 +893,11 @@ else
             0,
             20,
             20,
-            12,
-            drawY - 14);
+            iconX,
+            iconY);
+
+        if (fileTypeMask)
+            XSetClipMask(display, m_gc, None);
     }
 }
 
@@ -885,6 +920,23 @@ XFlush(display);
 void Launcher::LoadDesktopEntries()
 {
     namespace fs = std::filesystem;
+
+    // ReloadDesktopEntries() throws away every LauncherEntry below and
+    // rebuilds the list from scratch - free the icon resources the
+    // old entries were holding onto first, or every reload would leak
+    // one Pixmap and one mask per application into the X server for
+    // as long as Kohiko keeps running.
+    if (Display* display = m_connection.GetDisplay())
+    {
+        for (const auto& app : m_entries)
+        {
+            if (app.iconPixmap)
+                XFreePixmap(display, app.iconPixmap);
+
+            if (app.iconMask)
+                XFreePixmap(display, app.iconMask);
+        }
+    }
 
     m_entries.clear();
 
@@ -983,7 +1035,7 @@ if (!app.name.empty())
     if (!app.iconPath.empty())
 {
     app.iconPixmap =
-        LoadIcon(app.iconPath);
+        LoadIcon(app.iconPath, app.iconMask);
 }
 
     m_entries.push_back(app);
@@ -1042,8 +1094,11 @@ std::string Launcher::FindIconPath(
 }
 
 Pixmap Launcher::LoadIcon(
-    const std::string& path)
+    const std::string& path,
+    Pixmap& maskOut)
 {
+    maskOut = 0;
+
     if (path.empty())
         return 0;
 
@@ -1063,6 +1118,7 @@ Pixmap Launcher::LoadIcon(
     imlib_context_set_display(display);
     imlib_context_set_visual(visual);
     imlib_context_set_colormap(colormap);
+    imlib_context_set_drawable(m_window);
 
     Imlib_Image image =
         imlib_load_image(path.c_str());
@@ -1072,39 +1128,35 @@ Pixmap Launcher::LoadIcon(
 
     imlib_context_set_image(image);
 
-    Imlib_Image scaled =
-        imlib_create_cropped_scaled_image(
-            0,
-            0,
-            imlib_image_get_width(),
-            imlib_image_get_height(),
-            20,
-            20);
+    // Most icon themes hand out PNGs with an alpha channel (rounded
+    // corners, transparent padding around a smaller glyph, etc).
+    // Rendering straight onto a freshly created Pixmap - as this used
+    // to do - ignores that alpha entirely and paints over whatever the
+    // Pixmap's memory happened to already contain, which on every
+    // system this was tested on reads back as solid black: every icon
+    // showed up with a black square behind it instead of blending into
+    // the Launcher's actual (dark) background.
+    //
+    // Asking Imlib2 for a 1-bit shape mask alongside the pixmap -
+    // instead of just a flat-rendered pixmap - lets Redraw() clip its
+    // XCopyArea to only the icon's own opaque pixels via XSetClipMask,
+    // so whatever is already drawn underneath (the plain background,
+    // or the selected-row highlight) shows through everywhere else.
+    // That's real per-pixel transparency without needing a compositor
+    // or an ARGB visual, which a plain core-Xlib window like this one
+    // doesn't have.
+    Pixmap pixmap = 0;
+    Pixmap mask = 0;
+
+    imlib_render_pixmaps_for_whole_image_at_size(
+        &pixmap,
+        &mask,
+        20,
+        20);
 
     imlib_free_image();
 
-    if (!scaled)
-        return 0;
-
-    imlib_context_set_image(scaled);
-
-    Pixmap pixmap = XCreatePixmap(
-        display,
-        m_window,
-        20,
-        20,
-        DefaultDepth(
-            display,
-            m_connection.Screen()));
-
-    imlib_context_set_drawable(pixmap);
-
-    imlib_render_image_on_drawable(
-        0,
-        0);
-
-    imlib_free_image();
-
+    maskOut = mask;
     return pixmap;
 }
 
@@ -1247,6 +1299,7 @@ void Launcher::ReloadDesktopEntries()
 {
     m_entriesLoaded = false;
     LoadDesktopEntries();
+    BuildFileIndex();
     UpdateMatches();
 }
 
@@ -1262,13 +1315,13 @@ void Launcher::BuildFileIndex()
     if (!m_folderIconPixmap)
     {
         m_folderIconPixmap =
-            LoadIcon(FindIconPath("folder"));
+            LoadIcon(FindIconPath("folder"), m_folderIconMask);
     }
 
     if (!m_fileIconPixmap)
     {
         m_fileIconPixmap =
-            LoadIcon(FindIconPath("text-x-generic"));
+            LoadIcon(FindIconPath("text-x-generic"), m_fileIconMask);
     }
 
     const char* home = std::getenv("HOME");

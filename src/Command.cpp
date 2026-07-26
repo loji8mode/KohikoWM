@@ -91,6 +91,10 @@ Command Command::Parse(const std::string& text)
     {
         command.type = CommandType::NotepadToggle;
     }
+    else if (action == "launcher_reload" || action == "reloadlauncher")
+    {
+        command.type = CommandType::LauncherReload;
+    }
 
     return command;
 }

@@ -52,6 +52,12 @@ struct LauncherEntry
     std::string iconPath;
 
     Pixmap iconPixmap = 0;
+
+    // 1-bit shape mask that goes with iconPixmap (see Launcher::LoadIcon)
+    // - lets Redraw() clip its XCopyArea to just the icon's own opaque
+    // pixels instead of painting a solid square of whatever the
+    // Pixmap's memory happened to contain.
+    Pixmap iconMask = 0;
 };
 
 struct FileEntry
@@ -102,6 +108,16 @@ bool SelectedIsFile() const;
     // Called on Kohiko's ~1s idle heartbeat while open, to blink the
     // caret - cheap enough not to need a dedicated timer.
     void Blink();
+
+    // Rebuilds the cached application list (from .desktop files) and
+    // the file index (from $HOME) from scratch, so newly-installed
+    // programs and newly-created/removed files show up without
+    // restarting Kohiko. Not called automatically - wired up to
+    // CommandType::LauncherReload (default bind Super+Shift+D) and
+    // the `reloadlauncher` IPC verb, so it can be triggered on demand
+    // (e.g. right after installing something) instead of on every
+    // single Open(), which would mean re-walking the entire home
+    // directory every time Super+D is pressed.
     void ReloadDesktopEntries();
 
 private:
@@ -111,8 +127,12 @@ private:
     void LoadDesktopEntries();
     void BuildFileIndex();
 
+    // Returns the icon scaled to a 20x20 Pixmap and, via maskOut, the
+    // 1-bit shape mask that goes with it (see the .cpp for why both
+    // are needed to avoid a black box around every icon).
     Pixmap LoadIcon(
-        const std::string& path);
+        const std::string& path,
+        Pixmap& maskOut);
 
     std::string FindIconPath(
         const std::string& iconName);
@@ -162,6 +182,8 @@ std::unordered_map<std::string, int> m_launchCounts;
 std::vector<FileEntry> m_files;
 Pixmap m_folderIconPixmap = 0;
 Pixmap m_fileIconPixmap = 0;
+Pixmap m_folderIconMask = 0;
+Pixmap m_fileIconMask = 0;
 void LoadLaunchHistory();
 void SaveLaunchHistory();
 

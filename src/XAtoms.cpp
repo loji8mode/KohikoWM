@@ -19,6 +19,10 @@ void XAtoms::Initialize()
     WM_PROTOCOLS            = XInternAtom(display, "WM_PROTOCOLS", False);
     WM_DELETE_WINDOW         = XInternAtom(display, "WM_DELETE_WINDOW", False);
 
+    NET_SUPPORTED            = XInternAtom(display, "_NET_SUPPORTED", False);
+    NET_SUPPORTING_WM_CHECK  = XInternAtom(display, "_NET_SUPPORTING_WM_CHECK", False);
+    NET_CLIENT_LIST          = XInternAtom(display, "_NET_CLIENT_LIST", False);
+
     NET_ACTIVE_WINDOW        = XInternAtom(display, "_NET_ACTIVE_WINDOW", False);
     NET_WM_STATE             = XInternAtom(display, "_NET_WM_STATE", False);
     NET_WM_STATE_FULLSCREEN  = XInternAtom(display, "_NET_WM_STATE_FULLSCREEN", False);

@@ -23,7 +23,12 @@ enum class CommandType
     Reload,
     Quit,
     LauncherToggle,
-    NotepadToggle
+    NotepadToggle,
+
+    // Rebuilds the Launcher's cached application list and file index
+    // from disk right now, without restarting Kohiko - see Launcher's
+    // ReloadDesktopEntries() for details.
+    LauncherReload
 };
 
 // A parsed, ready-to-run action.

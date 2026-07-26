@@ -253,6 +253,88 @@ void XConnection::ConfigureWindowRaw(::Window window, XWindowChanges changes, un
     XConfigureWindow(m_display, window, valueMask, &changes);
 }
 
+// --- EWMH --------------------------------------------------------------------
+
+::Window XConnection::InitializeEwmhSupport(const XAtoms& atoms, const std::string& wmName)
+{
+    // Plenty of EWMH-aware tools - flameshot's screenshot overlay
+    // among them - check _NET_SUPPORTING_WM_CHECK before trusting
+    // _NET_CLIENT_LIST/_NET_ACTIVE_WINDOW at all, falling back to
+    // cruder XQueryTree-based window discovery otherwise. Per the
+    // spec, that property must point at a real window which carries
+    // the *same* property pointing back at itself - that round trip
+    // is how a client tells a live compliant WM apart from a stale
+    // property some previous, now-dead, WM left sitting on the root
+    // window.
+    ::Window checkWindow = XCreateSimpleWindow(m_display, m_root, -1, -1, 1, 1, 0, 0, 0);
+
+    XChangeProperty(
+        m_display, checkWindow, atoms.NET_SUPPORTING_WM_CHECK, XA_WINDOW, 32,
+        PropModeReplace, reinterpret_cast<unsigned char*>(&checkWindow), 1);
+
+    XChangeProperty(
+        m_display, checkWindow, atoms.NET_WM_NAME, atoms.UTF8_STRING, 8,
+        PropModeReplace, reinterpret_cast<const unsigned char*>(wmName.c_str()),
+        static_cast<int>(wmName.size()));
+
+    XChangeProperty(
+        m_display, m_root, atoms.NET_SUPPORTING_WM_CHECK, XA_WINDOW, 32,
+        PropModeReplace, reinterpret_cast<unsigned char*>(&checkWindow), 1);
+
+    // Everything Kohiko actually implements - this is what a client
+    // queries _NET_SUPPORTED for before relying on any one of them.
+    Atom supported[] = {
+        atoms.NET_SUPPORTED,
+        atoms.NET_SUPPORTING_WM_CHECK,
+        atoms.NET_ACTIVE_WINDOW,
+        atoms.NET_CLIENT_LIST,
+        atoms.NET_WM_NAME,
+        atoms.NET_WM_STATE,
+        atoms.NET_WM_STATE_FULLSCREEN,
+        atoms.NET_CURRENT_DESKTOP,
+        atoms.NET_WM_DESKTOP,
+        atoms.NET_WM_WINDOW_TYPE,
+        atoms.NET_WM_WINDOW_TYPE_DIALOG,
+        atoms.NET_WM_PID,
+    };
+
+    XChangeProperty(
+        m_display, m_root, atoms.NET_SUPPORTED, XA_ATOM, 32,
+        PropModeReplace, reinterpret_cast<unsigned char*>(supported),
+        static_cast<int>(sizeof(supported) / sizeof(supported[0])));
+
+    // Starts empty/unfocused - Manage()/Unmanage()/Focus() keep both
+    // properties in sync with reality from here on.
+    SetClientList(atoms, {});
+    SetActiveWindow(atoms, None);
+
+    return checkWindow;
+}
+
+void XConnection::SetClientList(const XAtoms& atoms, const std::vector<::Window>& clients)
+{
+    // XChangeProperty accepts a null data pointer when nelements is 0
+    // on every Xlib implementation this has ever run against, but
+    // pointing it at a real (unused) local instead of relying on that
+    // costs nothing and reads less like an accident.
+    ::Window empty = 0;
+    const ::Window* data = clients.empty() ? &empty : clients.data();
+
+    XChangeProperty(
+        m_display, m_root, atoms.NET_CLIENT_LIST, XA_WINDOW, 32,
+        PropModeReplace,
+        reinterpret_cast<const unsigned char*>(data),
+        static_cast<int>(clients.size()));
+}
+
+void XConnection::SetActiveWindow(const XAtoms& atoms, ::Window window)
+{
+    XChangeProperty(
+        m_display, m_root, atoms.NET_ACTIVE_WINDOW, XA_WINDOW, 32,
+        PropModeReplace,
+        reinterpret_cast<unsigned char*>(&window), 1);
+}
+
 void XConnection::GrabKey(unsigned int keycode, unsigned int modifiers)
 {
     XGrabKey(

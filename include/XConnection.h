@@ -92,6 +92,26 @@ public:
     // or not-yet-managed client asked for it.
     void ConfigureWindowRaw(::Window window, XWindowChanges changes, unsigned int valueMask);
 
+    // --- EWMH ---------------------------------------------------------------
+
+    // Creates the invisible check window, points root and the check
+    // window's _NET_SUPPORTING_WM_CHECK at each other, and publishes
+    // _NET_SUPPORTED - see XConnection.cpp for why tools like flameshot
+    // care about this. Returns the check window (Kohiko doesn't need
+    // to do anything else with it, but keeps it around for the
+    // lifetime of the connection rather than leaking an anonymous X
+    // window). Called once, from WindowManager::Initialize().
+    ::Window InitializeEwmhSupport(const XAtoms& atoms, const std::string& wmName);
+
+    // Kept in sync with WindowRepository by Manage()/Unmanage() every
+    // time a window starts or stops being managed.
+    void SetClientList(const XAtoms& atoms, const std::vector<::Window>& clients);
+
+    // Kept in sync by Focus()/FocusNextAvailable() - `window` is None
+    // when nothing is focused (e.g. the last client on a workspace
+    // just closed).
+    void SetActiveWindow(const XAtoms& atoms, ::Window window);
+
     // --- grabs -----------------------------------------------------------
 
     // Global grabs on the root window (keybinds, Super+drag).

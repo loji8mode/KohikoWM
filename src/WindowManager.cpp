@@ -50,6 +50,13 @@ void WindowManager::Initialize()
     m_cursor.Initialize();
     m_monitors.Detect();
 
+    // Advertise EWMH support - _NET_SUPPORTED/_NET_SUPPORTING_WM_CHECK
+    // let tools that check for a compliant window manager (flameshot's
+    // screenshot overlay among them) trust _NET_CLIENT_LIST and
+    // _NET_ACTIVE_WINDOW, which Manage()/Unmanage()/Focus() below keep
+    // current from here on.
+    m_ewmhCheckWindow = m_connection.InitializeEwmhSupport(m_atoms, "kohiko");
+
     m_bar.Configure(m_config, m_monitors.Primary().Geometry());
     m_bar.Show();
 
@@ -328,6 +335,11 @@ void WindowManager::Execute(const Command& command)
         case CommandType::LauncherToggle:   ToggleLauncher();                      break;
         case CommandType::NotepadToggle:    ToggleNotepad();                       break;
 
+        case CommandType::LauncherReload:
+            m_launcher.ReloadDesktopEntries();
+            m_launcher.HandleExpose();
+            break;
+
         case CommandType::NoCommand:
         default:
             break;
@@ -501,6 +513,13 @@ std::string WindowManager::HandleIpcCommand(const std::string& request)
         return "ok";
     }
 
+    if (verb == "reloadlauncher")
+    {
+        m_launcher.ReloadDesktopEntries();
+        m_launcher.HandleExpose();
+        return "ok";
+    }
+
     if (verb == "quit")
     {
         m_running = false;
@@ -633,6 +652,8 @@ void WindowManager::Manage(WindowID id)
     {
         Arrange();
     }
+
+    RefreshClientList();
 }
 
 void WindowManager::Unmanage(WindowID id)
@@ -651,10 +672,23 @@ void WindowManager::Unmanage(WindowID id)
     m_scratchpad.Forget(id);
     m_repository.Remove(id);
 
+    RefreshClientList();
+
     if (wasFocused)
         FocusNextAvailable();
 
     Arrange();
+}
+
+void WindowManager::RefreshClientList()
+{
+    std::vector<::Window> ids;
+    ids.reserve(m_repository.All().size());
+
+    for (ManagedWindow* window : m_repository.All())
+        ids.push_back(window->Id());
+
+    m_connection.SetClientList(m_atoms, ids);
 }
 
 void WindowManager::Focus(WindowID id)
@@ -670,6 +704,7 @@ void WindowManager::Focus(WindowID id)
     m_workspaces.Get(window->Workspace()).Tree().Focus(window);
 
     m_connection.SetInputFocus(id);
+    m_connection.SetActiveWindow(m_atoms, id);
 
     RefreshBorderColor(window);
 
@@ -695,6 +730,7 @@ void WindowManager::FocusNextAvailable()
 
     m_repository.ClearFocus();
     m_connection.SetInputFocus(m_connection.Root());
+    m_connection.SetActiveWindow(m_atoms, None);
     m_bar.SetTitle("");
     m_bar.Redraw();
 }

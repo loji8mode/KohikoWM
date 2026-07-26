@@ -28,6 +28,7 @@ a full compositor.
 - [Running it](#running-it)
 - [Configuration](#configuration)
 - [Default keybindings](#default-keybindings)
+- [EWMH support](#ewmh-support)
 - [The mouse: swap and resize](#the-mouse-swap-and-resize)
 - [The launcher (Super+D)](#the-launcher-superd)
 - [The notepad (Super+N)](#the-notepad-supern)
@@ -166,6 +167,7 @@ Reload after editing without restarting: `kohikoctl reload` (also bound to
 | `Super+R`              | rotate the focused split (vertical <-> horizontal) |
 | `Super+Shift+R`        | flip the focused split (mirror the two panes) |
 | `Print`                | screenshot via `exec.screenshot` (flameshot by default) |
+| `Super+Shift+D`        | re-scan applications/files for the launcher (live update) |
 | `Super+H/J/K/L`        | move focus left/down/up/right             |
 | `Super+1..0`           | switch to workspace 1-10                  |
 | `Super+Shift+1..0`     | send the focused window to workspace 1-10 |
@@ -183,6 +185,29 @@ the right edge of the bar, just left of the clock, the same way they
 would in any other status bar. No configuration needed - Kohiko takes
 ownership of the tray selection on startup and lays out whatever docks
 itself with it, left to right, in the order it arrived.
+
+## EWMH support
+
+Kohiko advertises itself as a compliant window manager on startup, per
+the EWMH/NetWM spec: it creates an invisible check window and publishes
+`_NET_SUPPORTING_WM_CHECK` (proof there's a *live* WM, not a stale
+property left over from one that already exited) and `_NET_SUPPORTED`
+(the list below). It then keeps two more properties current for the
+lifetime of the session:
+
+- `_NET_CLIENT_LIST` - every window Kohiko currently manages, updated
+  the moment one is added or removed.
+- `_NET_ACTIVE_WINDOW` - whichever window is currently focused (unset
+  when nothing is).
+
+`_NET_WM_NAME` is honoured both ways: Kohiko reads it from client
+windows for their title (shown in the bar), and sets it on its own
+check window for the round-trip above.
+
+This is what lets EWMH-aware tools that check for a compliant window
+manager before trusting anything - flameshot's screenshot overlay is
+the motivating example - work correctly under Kohiko instead of falling
+back to less reliable window discovery.
 
 ## The mouse: swap and resize
 
@@ -229,6 +254,14 @@ similar instead, the general `exec.<name>=` + `bind=... exec <name>`
 mechanism is still there for it; see the commented-out example in
 `config/default.conf`.
 
+The application list (from `/usr/share/applications/*.desktop`) and the
+file index (from `$HOME`) are both cached in memory rather than
+re-scanned on every `Super+D` - walking your entire home directory on
+every keystroke would make the launcher feel slow. Install something
+new, or add/remove a file, and it won't show up until that cache is
+refreshed - either `Super+Shift+D` or `kohikoctl reloadlauncher` does
+that immediately, live, with no restart required.
+
 ## The notepad (Super+N)
 
 `Super+N` toggles a small native scratch-notes box: free-form multi-line
@@ -264,6 +297,7 @@ kohikoctl monitors                     # JSON: detected monitors
 kohikoctl activewindow                 # JSON: the focused window, or null
 kohikoctl tree                         # JSON: the current workspace's BSP tree
 kohikoctl reload
+kohikoctl reloadlauncher              # re-scan applications/files live, no restart needed
 kohikoctl quit
 ```
 

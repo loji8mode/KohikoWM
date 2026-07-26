@@ -21,6 +21,15 @@ public:
     Atom WM_PROTOCOLS;
     Atom WM_DELETE_WINDOW;
 
+    // EWMH root-window identification, published by
+    // XConnection::InitializeEwmhSupport() so tools that check for a
+    // compliant window manager (flameshot's screenshot overlay among
+    // them) can trust NET_CLIENT_LIST/NET_ACTIVE_WINDOW instead of
+    // falling back to cruder window discovery.
+    Atom NET_SUPPORTED;
+    Atom NET_SUPPORTING_WM_CHECK;
+    Atom NET_CLIENT_LIST;
+
     Atom NET_ACTIVE_WINDOW;
     Atom NET_WM_STATE;
     Atom NET_WM_STATE_FULLSCREEN;
