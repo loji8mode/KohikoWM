@@ -29,9 +29,17 @@ void XAtoms::Initialize()
     NET_CURRENT_DESKTOP      = XInternAtom(display, "_NET_CURRENT_DESKTOP", False);
     NET_WM_DESKTOP           = XInternAtom(display, "_NET_WM_DESKTOP", False);
     NET_WM_NAME              = XInternAtom(display, "_NET_WM_NAME", False);
-    NET_WM_WINDOW_TYPE       = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
-    NET_WM_WINDOW_TYPE_DIALOG = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DIALOG", False);
     NET_WM_PID               = XInternAtom(display, "_NET_WM_PID", False);
+
+    NET_WM_WINDOW_TYPE            = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
+    NET_WM_WINDOW_TYPE_NORMAL     = XInternAtom(display, "_NET_WM_WINDOW_TYPE_NORMAL", False);
+    NET_WM_WINDOW_TYPE_DIALOG     = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DIALOG", False);
+    NET_WM_WINDOW_TYPE_UTILITY    = XInternAtom(display, "_NET_WM_WINDOW_TYPE_UTILITY", False);
+    NET_WM_WINDOW_TYPE_SPLASH     = XInternAtom(display, "_NET_WM_WINDOW_TYPE_SPLASH", False);
+    NET_WM_WINDOW_TYPE_TOOLBAR    = XInternAtom(display, "_NET_WM_WINDOW_TYPE_TOOLBAR", False);
+    NET_WM_WINDOW_TYPE_POPUP_MENU = XInternAtom(display, "_NET_WM_WINDOW_TYPE_POPUP_MENU", False);
+    NET_WM_WINDOW_TYPE_DROPDOWN_MENU = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU", False);
+    NET_WM_WINDOW_TYPE_MENU       = XInternAtom(display, "_NET_WM_WINDOW_TYPE_MENU", False);
 
     WM_WINDOW_ROLE           = XInternAtom(display, "WM_WINDOW_ROLE", False);
 

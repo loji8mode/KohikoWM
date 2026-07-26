@@ -218,13 +218,24 @@ window after running it) shows you the actual class/instance/title to
 match on if you're not sure.
 
 Every window still gets sensible behaviour with **no** rule at all:
-transient/dialog windows float automatically, and any floating window -
-automatic or `float` above - opens centered at whatever size it actually
-asked for (its `WM_NORMAL_HINTS`, or failing that its own size at the
-moment it asked to be mapped) rather than a flat fraction of the screen,
-so it doesn't get squashed or stretched into a size it was never designed
-for. `windowrule=` exists for the apps that don't play along with that on
-their own.
+transient windows (anything with `WM_TRANSIENT_FOR` set) and every
+dialog/utility/splash/toolbar/popup-menu `_NET_WM_WINDOW_TYPE` float
+automatically and never enter the BSP tree - only a plain window with
+neither (EWMH's definition of NORMAL) ever gets tiled. A transient
+child additionally always lands on whatever workspace its parent is
+actually on right now (following it there if the parent isn't on the
+current workspace), opens centered over the parent's own window rather
+than the middle of the screen, and takes focus the moment it appears -
+so a GIMP color picker, an IntelliJ/Android Studio dialog, a file
+picker, a confirmation prompt, or TLauncher's own update/login prompts
+always show up attached to the window that spawned them instead of
+floating in the wrong place or getting silently left behind on another
+workspace. Any floating window - automatic or `float` above - opens
+sized at whatever it actually asked for (its `WM_NORMAL_HINTS`, or
+failing that its own size at the moment it asked to be mapped) rather
+than a flat fraction of the screen, so it doesn't get squashed or
+stretched into a size it was never designed for. `windowrule=` exists
+for the apps that don't play along with that on their own.
 
 ## Autostart
 
@@ -525,8 +536,6 @@ into a tile it's already shown it won't render into correctly.
   correctly via XRandr, but all tiling currently happens against the
   primary monitor; independent per-monitor workspaces are a plausible
   future addition, not implemented yet.
-- **No system tray in the bar**, matching the original design note that
-  called it out as later-stage work.
 - **The scratchpad holds one window at a time** - assign a new one only
   after closing (or `Super+Space`-releasing) the current occupant.
 - Moving a **floating** window around isn't bound to anything by design

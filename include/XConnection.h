@@ -198,7 +198,19 @@ public:
 
     bool GetTransientFor(::Window window, ::Window& owner);
 
-    bool IsDialog(::Window window, const XAtoms& atoms);
+    // True if _NET_WM_WINDOW_TYPE declares this window as one of the
+    // types that should never enter the BSP tiling algorithm and
+    // should instead always open floating: DIALOG, UTILITY, SPLASH,
+    // TOOLBAR, POPUP_MENU, DROPDOWN_MENU, or MENU. A window with no
+    // _NET_WM_WINDOW_TYPE at all (most plain top-level application
+    // windows) - or one that only carries NORMAL - correctly returns
+    // false here, exactly as EWMH says a type-less top-level window
+    // with no WM_TRANSIENT_FOR should be treated as NORMAL and left to
+    // the tiling algorithm; WindowManager::Manage() combines this with
+    // GetTransientFor() (a window can lack any of these types and
+    // still need to float purely because it's transient-for another
+    // window) rather than either check alone deciding it.
+    bool IsFloatingWindowType(::Window window, const XAtoms& atoms);
 
     std::string LastError() const;
 

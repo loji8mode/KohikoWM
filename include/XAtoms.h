@@ -36,9 +36,26 @@ public:
     Atom NET_CURRENT_DESKTOP;
     Atom NET_WM_DESKTOP;
     Atom NET_WM_NAME;
-    Atom NET_WM_WINDOW_TYPE;
-    Atom NET_WM_WINDOW_TYPE_DIALOG;
     Atom NET_WM_PID;
+
+    // _NET_WM_WINDOW_TYPE and every type value Kohiko treats as
+    // "never tile this, always float it attached to whatever it's
+    // transient for" - see XConnection::IsFloatingWindowType(). NORMAL
+    // is interned too even though it's never checked against directly:
+    // its absence (a window with no recognised type at all) is what
+    // EWMH says to treat as NORMAL anyway, so WindowManager::Manage()
+    // never needs to compare against it - it's here purely so
+    // `kohikoctl`/debugging output and any future rule matching has it
+    // available without a second round of XInternAtom calls.
+    Atom NET_WM_WINDOW_TYPE;
+    Atom NET_WM_WINDOW_TYPE_NORMAL;
+    Atom NET_WM_WINDOW_TYPE_DIALOG;
+    Atom NET_WM_WINDOW_TYPE_UTILITY;
+    Atom NET_WM_WINDOW_TYPE_SPLASH;
+    Atom NET_WM_WINDOW_TYPE_TOOLBAR;
+    Atom NET_WM_WINDOW_TYPE_POPUP_MENU;
+    Atom NET_WM_WINDOW_TYPE_DROPDOWN_MENU;
+    Atom NET_WM_WINDOW_TYPE_MENU;
 
     Atom WM_WINDOW_ROLE;
 

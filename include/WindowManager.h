@@ -238,7 +238,20 @@ private:
     // flat 50%-of-the-screen guess CenteredFloatingRect(0.5, 0.5)
     // makes on its own. Falls back to that same 50/50 guess only when
     // the client's own idea of its size is missing or unusably small.
-    Rect CenteredFloatingRectForWindow(WindowID id, const XWindowAttributes& attrs);
+    //
+    // `parent` is the managed window this one is WM_TRANSIENT_FOR, if
+    // any (nullptr otherwise, e.g. an ordinary `windowrule=float` match
+    // or a transient hint that didn't resolve to a window Kohiko
+    // manages). When given, the result is centered over `parent`'s own
+    // Geometry() instead of the monitor - "center the child relative
+    // to its parent when possible" - and only clamped against the
+    // monitor bounds so it can never end up partly off-screen even if
+    // the parent itself is sitting near an edge.
+    Rect CenteredFloatingRectForWindow(
+        WindowID id,
+        const XWindowAttributes& attrs,
+        ManagedWindow* parent = nullptr
+    );
 
     unsigned long ParseColor(const std::string& key, const std::string& fallback) const;
 

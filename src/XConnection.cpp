@@ -303,7 +303,14 @@ void XConnection::ConfigureWindowRaw(::Window window, XWindowChanges changes, un
         atoms.NET_CURRENT_DESKTOP,
         atoms.NET_WM_DESKTOP,
         atoms.NET_WM_WINDOW_TYPE,
+        atoms.NET_WM_WINDOW_TYPE_NORMAL,
         atoms.NET_WM_WINDOW_TYPE_DIALOG,
+        atoms.NET_WM_WINDOW_TYPE_UTILITY,
+        atoms.NET_WM_WINDOW_TYPE_SPLASH,
+        atoms.NET_WM_WINDOW_TYPE_TOOLBAR,
+        atoms.NET_WM_WINDOW_TYPE_POPUP_MENU,
+        atoms.NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
+        atoms.NET_WM_WINDOW_TYPE_MENU,
         atoms.NET_WM_PID,
     };
 
@@ -667,7 +674,7 @@ bool XConnection::GetTransientFor(::Window window, ::Window& owner)
     return false;
 }
 
-bool XConnection::IsDialog(::Window window, const XAtoms& atoms)
+bool XConnection::IsFloatingWindowType(::Window window, const XAtoms& atoms)
 {
     Atom actualType;
     int actualFormat = 0;
@@ -675,7 +682,7 @@ bool XConnection::IsDialog(::Window window, const XAtoms& atoms)
     unsigned long bytesLeft = 0;
     unsigned char* data = nullptr;
 
-    bool isDialog = false;
+    bool isFloatingType = false;
 
     if (XGetWindowProperty(
             m_display, window, atoms.NET_WM_WINDOW_TYPE, 0, 16, False,
@@ -684,11 +691,22 @@ bool XConnection::IsDialog(::Window window, const XAtoms& atoms)
     {
         Atom* types = reinterpret_cast<Atom*>(data);
 
+        // _NET_WM_WINDOW_TYPE can legally carry more than one atom
+        // (most specific first, per the spec) - a window is one of
+        // Kohiko's "always float" types if *any* entry names one,
+        // regardless of position, the same tolerant approach the
+        // single-type DIALOG check this replaced already took.
         for (unsigned long i = 0; i < itemCount; ++i)
         {
-            if (types[i] == atoms.NET_WM_WINDOW_TYPE_DIALOG)
+            if (types[i] == atoms.NET_WM_WINDOW_TYPE_DIALOG ||
+                types[i] == atoms.NET_WM_WINDOW_TYPE_UTILITY ||
+                types[i] == atoms.NET_WM_WINDOW_TYPE_SPLASH ||
+                types[i] == atoms.NET_WM_WINDOW_TYPE_TOOLBAR ||
+                types[i] == atoms.NET_WM_WINDOW_TYPE_POPUP_MENU ||
+                types[i] == atoms.NET_WM_WINDOW_TYPE_DROPDOWN_MENU ||
+                types[i] == atoms.NET_WM_WINDOW_TYPE_MENU)
             {
-                isDialog = true;
+                isFloatingType = true;
                 break;
             }
         }
@@ -696,7 +714,7 @@ bool XConnection::IsDialog(::Window window, const XAtoms& atoms)
         XFree(data);
     }
 
-    return isDialog;
+    return isFloatingType;
 }
 
 std::string XConnection::LastError() const

@@ -772,7 +772,14 @@ void WindowManager::Manage(WindowID id)
 
     WindowID transientOwner = 0;
     bool isTransient = m_connection.GetTransientFor(id, transientOwner);
-    bool isDialog = m_connection.IsDialog(id, m_atoms);
+    bool isFloatingType = m_connection.IsFloatingWindowType(id, m_atoms);
+
+    // The managed window `id` is WM_TRANSIENT_FOR, if the hint
+    // resolves to one - nullptr for a plain top-level window, for a
+    // hint pointing at the root/an unmanaged window, and for a hint
+    // that hasn't been set at all. Everything below that talks about
+    // "the parent" means this, not the raw transientOwner id.
+    ManagedWindow* parent = isTransient ? m_repository.Get(transientOwner) : nullptr;
 
     WindowRuleEffect rules = ResolveWindowRules(className, instanceName, window->Title());
 
@@ -780,9 +787,17 @@ void WindowManager::Manage(WindowID id)
     // on its own dedicated workspace instead of cluttering whatever's
     // current" is the motivating example) has to land before the
     // tiling-capacity checks below, since which workspace this window
-    // even competes for room on depends on it.
+    // even competes for room on depends on it. An explicit rule like
+    // that is a deliberate per-window override and wins over automatic
+    // parent-attachment; absent one, a transient/dialog always belongs
+    // on whichever workspace its parent actually lives on right now -
+    // "the child always appears attached to its parent, never on the
+    // wrong workspace" - rather than wherever happened to be current
+    // when it was mapped.
     if (rules.forceWorkspace >= 1 && rules.forceWorkspace <= m_workspaces.Count())
         window->SetWorkspace(rules.forceWorkspace);
+    else if (parent)
+        window->SetWorkspace(parent->Workspace());
 
     // `windowrule=tile` is an explicit "no matter what this
     // application's own hints say, force it into the tiling layout"
@@ -795,13 +810,19 @@ void WindowManager::Manage(WindowID id)
     // "own size" again, Kohiko simply never honours for a tiled window
     // (see HandleConfigureRequest): once tiled, it stays exactly the
     // size Kohiko's layout says, strictly, for good.
-    bool wantsFloat = !rules.forceTile && (rules.forceFloat || isTransient || isDialog);
+    //
+    // Absent that override, every dialog/utility/splash/toolbar/popup
+    // window type and every window with a WM_TRANSIENT_FOR set at all
+    // floats - only a plain window with none of those (EWMH's
+    // definition of NORMAL) ever reaches TryTile() below, so only
+    // NORMAL windows ever enter the BSP tree.
+    bool wantsFloat = !rules.forceTile && (rules.forceFloat || isTransient || isFloatingType);
 
     if (wantsFloat)
     {
         window->SetState(WindowState::Floating);
 
-        Rect geometry = CenteredFloatingRectForWindow(id, attrs);
+        Rect geometry = CenteredFloatingRectForWindow(id, attrs, parent);
         window->SetGeometry(geometry);
         window->SetFloatingGeometry(geometry);
 
@@ -874,7 +895,7 @@ void WindowManager::Manage(WindowID id)
                 // floating it instead.
                 window->SetState(WindowState::Floating);
 
-                Rect geometry = CenteredFloatingRectForWindow(id, attrs);
+                Rect geometry = CenteredFloatingRectForWindow(id, attrs, parent);
                 window->SetGeometry(geometry);
                 window->SetFloatingGeometry(geometry);
 
@@ -911,6 +932,34 @@ void WindowManager::Manage(WindowID id)
         window->SetState(WindowState::Fullscreen);
         m_connection.SetNetWmState(m_atoms, id, true);
     }
+
+    // A transient/dialog child was pinned to its parent's workspace
+    // above, whichever one that turns out to be - if that's not the
+    // workspace currently on screen, switching to it now is what makes
+    // "always appear attached to its parent" actually true, rather
+    // than just true in the bookkeeping while the window itself sits
+    // unmapped in the background until someone happens to switch over
+    // manually. Deliberately gated on `parent` (not just "landed on a
+    // background workspace" in general) - an ordinary `windowrule=
+    // workspace:N` window with no parent is *supposed* to open quietly
+    // in the background without yanking focus away from whatever the
+    // user is doing (see the comment on that rule in ResolveWindowRules's
+    // caller above); only a transient explicitly follows its parent
+    // into view. Compares against window->Workspace() rather than
+    // parent->Workspace() directly so an explicit `windowrule=
+    // workspace:N` that disagreed with the parent's workspace (it wins,
+    // above) is still respected here rather than switching to
+    // wherever the parent happens to be instead.
+    //
+    // SwitchWorkspace() unmaps the old workspace, arranges and maps the
+    // new one (which by now already includes this window - it was
+    // added to m_repository, and had its workspace set, above), and
+    // focuses whatever it finds first there; the block below then
+    // takes over and re-focuses this window specifically, exactly the
+    // same way it already corrects for SwitchWorkspace()'s "focus the
+    // front visible window" default in the normal switch-workspace path.
+    if (parent && window->Workspace() != m_workspaces.CurrentId())
+        SwitchWorkspace(window->Workspace());
 
     // A window the fallback above redistributed onto a *different*
     // workspace must stay unmapped and unfocused, exactly like every
@@ -1825,7 +1874,10 @@ Rect WindowManager::CenteredFloatingRect(float widthFraction, float heightFracti
     return rect.ClampedTo(monitor, borderWidth);
 }
 
-Rect WindowManager::CenteredFloatingRectForWindow(WindowID id, const XWindowAttributes& attrs)
+Rect WindowManager::CenteredFloatingRectForWindow(
+    WindowID id,
+    const XWindowAttributes& attrs,
+    ManagedWindow* parent)
 {
     int width = 0;
     int height = 0;
@@ -1845,15 +1897,28 @@ Rect WindowManager::CenteredFloatingRectForWindow(WindowID id, const XWindowAttr
         height = attrs.height;
     }
 
+    const Rect& monitor = m_monitors.Primary().Geometry();
+    int borderWidth = m_config.GetInt("general.border_size", 2);
+
     // A handful of windows genuinely don't have any usable size to go
     // on (0, or something too small to be more than a sliver) - rather
     // than ever placing an unusable window, fall back to the old
-    // half-the-screen default exactly like before this existed.
+    // half-the-screen default exactly like before this existed. A
+    // transient parent still gets to say *where* (centered over it
+    // rather than the whole monitor) even when it can't say *how big*.
     if (width < 50 || height < 30)
-        return CenteredFloatingRect(0.5f, 0.5f);
+    {
+        if (!parent)
+            return CenteredFloatingRect(0.5f, 0.5f);
 
-    const Rect& monitor = m_monitors.Primary().Geometry();
-    int borderWidth = m_config.GetInt("general.border_size", 2);
+        Rect rect;
+        rect.width  = static_cast<int>(static_cast<float>(monitor.width)  * 0.5f);
+        rect.height = static_cast<int>(static_cast<float>(monitor.height) * 0.5f);
+        rect.x = parent->Geometry().CenterX() - rect.width  / 2;
+        rect.y = parent->Geometry().CenterY() - rect.height / 2;
+
+        return rect.ClampedTo(monitor, borderWidth);
+    }
 
     // Never let a window's own idea of its size push it off-screen -
     // still centered, just clamped to comfortably fit (a soft 95% cap
@@ -1872,8 +1937,24 @@ Rect WindowManager::CenteredFloatingRectForWindow(WindowID id, const XWindowAttr
     Rect rect;
     rect.width  = width;
     rect.height = height;
-    rect.x = monitor.x + (monitor.width  - width)  / 2;
-    rect.y = monitor.y + (monitor.height - height) / 2;
+
+    if (parent)
+    {
+        // Center on the parent's own current rect rather than the
+        // monitor - see the header comment on this overload: a GIMP
+        // color picker or a file-save dialog should appear right over
+        // the window that spawned it, not wherever happens to be the
+        // middle of the screen. Still clamped to the monitor below, so
+        // a parent sitting near an edge can never push the child
+        // partly off-screen.
+        rect.x = parent->Geometry().CenterX() - width  / 2;
+        rect.y = parent->Geometry().CenterY() - height / 2;
+    }
+    else
+    {
+        rect.x = monitor.x + (monitor.width  - width)  / 2;
+        rect.y = monitor.y + (monitor.height - height) / 2;
+    }
 
     return rect.ClampedTo(monitor, borderWidth);
 }
