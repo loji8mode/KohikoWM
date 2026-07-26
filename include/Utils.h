@@ -28,6 +28,17 @@ std::vector<std::string> SplitWhitespace(
     const std::string& value
 );
 
+// Splits `value` on every occurrence of `separator`, dropping empty
+// tokens and trimming surrounding whitespace from each one. Used for
+// freedesktop's semicolon-separated lists (Categories=, Keywords=,
+// Inherits=, ...) and for comma-separated config lists - both usually
+// end with a trailing separator, which would otherwise produce a
+// spurious empty final token.
+std::vector<std::string> Split(
+    const std::string& value,
+    char separator
+);
+
 // Byte offset of the start of the UTF-8 codepoint immediately before
 // `pos` (clamped to 0 if `pos` is already at/before the start). Lets
 // cursor movement, backspace, and delete act on whole characters

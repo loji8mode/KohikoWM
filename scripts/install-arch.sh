@@ -33,8 +33,10 @@ echo "==> Installing dependencies (pacman)"
 # base-devel      - gcc/g++, make, pkgconf
 # libx11          - core Xlib (window manager, bar, launcher, notepad)
 # libxrandr       - optional multi-monitor support, auto-detected by the Makefile
-# imlib2          - icon loading (Launcher/Notepad)
-# gtk3            - icon-theme lookup only (GtkIconTheme in Launcher.cpp)
+# imlib2          - icon loading and rendering (Launcher/Notepad) - icon-theme
+#                   *lookup* is Kohiko's own freedesktop Icon Theme
+#                   Specification implementation (see include/IconResolver.h),
+#                   no toolkit dependency needed for that anymore
 # libxft          - text rendering with automatic per-glyph font fallback
 #                   across whatever's installed (see include/Font.h) - this
 #                   is what lets Bar/Launcher/Notepad render languages the
@@ -52,7 +54,6 @@ sudo pacman -S --needed --noconfirm \
     libx11 \
     libxrandr \
     imlib2 \
-    gtk3 \
     libxft \
     ttf-dejavu \
     xorg-server \

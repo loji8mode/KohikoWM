@@ -2,17 +2,17 @@
 
 #include <filesystem>
 
+#include "AppIndex.h"
 #include "Font.h"
+#include "HistoryStore.h"
 #include "Types.h"
 
 #include <X11/Xlib.h>
 
+#include <mutex>
+#include <string>
+#include <thread>
 #include <unordered_map>
-
-#include <string>
-
-#include <string>
-
 #include <vector>
 
 namespace Kohiko
@@ -44,23 +44,15 @@ enum class LauncherResult
 // ever being the reason Kohiko's global hotkeys stop responding - the
 // exact failure mode the Super+Q hardening in WindowManager::Manage()
 // guards against.
-
-struct LauncherEntry
-{
-    std::string name;
-    std::string desktopId;
-    std::string exec;
-    std::string icon;
-    std::string iconPath;
-
-    Pixmap iconPixmap = 0;
-
-    // 1-bit shape mask that goes with iconPixmap (see Launcher::LoadIcon)
-    // - lets Redraw() clip its XCopyArea to just the icon's own opaque
-    // pixels instead of painting a solid square of whatever the
-    // Pixmap's memory happened to contain.
-    Pixmap iconMask = 0;
-};
+//
+// Search architecture: the actual application list lives in
+// AppIndex.h/LauncherScoring.h (parsing, deduplication, icon
+// resolution, ranking - all pure, X11-free code, independently
+// testable - see tests/test_launcherscoring.cpp). Launcher itself is
+// just the X11 front end: it owns the in-memory index, rebuilds it on
+// a background thread so opening/typing never blocks on the
+// filesystem, and turns each keystroke's ranked results into rows on
+// screen.
 
 struct FileEntry
 {
@@ -99,7 +91,7 @@ public:
     const std::string& Query() const;
     std::string SelectedCommand();
     std::string SelectedPath();
-bool SelectedIsFile() const;
+    bool SelectedIsFile() const;
 
     LauncherResult HandleKeyPress(
         const XKeyEvent& event
@@ -111,33 +103,73 @@ bool SelectedIsFile() const;
     // caret - cheap enough not to need a dedicated timer.
     void Blink();
 
-    // Rebuilds the cached application list (from .desktop files) and
-    // the file index (from $HOME) from scratch, so newly-installed
-    // programs and newly-created/removed files show up without
-    // restarting Kohiko. Not called automatically - wired up to
+    // Rebuilds the application index (from .desktop files, via
+    // AppIndex::Build()) and the file index (from $HOME) on a
+    // background thread, so newly-installed programs and newly-
+    // created/removed files show up without restarting Kohiko. Not
+    // called automatically after the first Configure() - wired up to
     // CommandType::LauncherReload (default bind Super+Shift+D) and
-    // the `reloadlauncher` IPC verb, so it can be triggered on demand
-    // (e.g. right after installing something) instead of on every
-    // single Open(), which would mean re-walking the entire home
-    // directory every time Super+D is pressed.
+    // the `reloadlauncher` IPC verb, so it happens on demand instead
+    // of on every single Open().
     void ReloadDesktopEntries();
 
 private:
 
     void Redraw();
     void UpdateMatches();
-    void LoadDesktopEntries();
-    void BuildFileIndex();
+
+    // Appends a "Search <engine> for '<query>'" row to m_matches when
+    // appropriate - either a recognized smart prefix ("yt cats") or,
+    // when `haveLocalResults` is false, the configured default/
+    // fallback engines. See LAUNCHER-SEARCH ENGINES in default.conf.
+    void BuildInternetMatches(
+        bool haveLocalResults
+    );
+
+    void AddInternetMatch(
+        const std::string& engineId,
+        const std::string& queryText,
+        bool priority
+    );
+
+    // Joins any previous build (a no-op if it already finished, which
+    // in practice it always has by the time this runs again) and
+    // starts a fresh one on m_buildThread.
+    void StartIndexRebuild();
+
+    // Runs entirely on m_buildThread: builds/loads the application
+    // index and scans $HOME for the file index, then publishes both
+    // into m_index/m_files under m_indexMutex. Touches only the
+    // filesystem (via AppIndex/IconResolver, both X11-free) - never
+    // X11, Imlib2, or Config - so it's safe to run concurrently with
+    // the UI thread. `includeHidden`/`strictFiltering` are captured by
+    // value from Config at the point the thread is started, rather
+    // than read from `this` here, so a later Configure() call can
+    // never race this thread's reads of them.
+    void RebuildIndexAndFiles(
+        bool includeHidden,
+        bool strictFiltering
+    );
 
     // Returns the icon scaled to a 20x20 Pixmap and, via maskOut, the
     // 1-bit shape mask that goes with it (see the .cpp for why both
-    // are needed to avoid a black box around every icon).
+    // are needed to avoid a black box around every icon). Low-level -
+    // always decodes/rasterizes; callers want ResolveIconPixmap()
+    // below instead, which caches this by path.
     Pixmap LoadIcon(
         const std::string& path,
         Pixmap& maskOut);
 
-    std::string FindIconPath(
-        const std::string& iconName);
+    // LoadIcon(), but only once per distinct `iconPath` - every
+    // subsequent call (whether for the same application redrawn again,
+    // or a different application that happens to share an icon)
+    // reuses the cached Pixmap/mask instead of re-decoding the file.
+    // Empty `iconPath` (e.g. an Internet-search row, or an app whose
+    // icon genuinely couldn't be resolved) returns {0, 0} - Redraw()
+    // just skips drawing an icon for that row.
+    Pixmap ResolveIconPixmap(
+        const std::string& iconPath,
+        Pixmap& maskOut);
 
 private:
 
@@ -162,38 +194,72 @@ private:
     unsigned long m_foregroundPixel = 0;
     unsigned long m_borderPixel = 0;
     unsigned long m_placeholderPixel = 0;
-std::vector<LauncherEntry> m_entries;
-bool m_entriesLoaded = false;
-enum class MatchType
-{
-    Application,
-    File
-};
 
-struct MatchResult
-{
-    MatchType type;
-    std::size_t index;
-    int score;
-};
+    // --- search index - written only by m_buildThread, read only from
+    // inside UpdateMatches() while holding m_indexMutex. Nothing else
+    // (Redraw(), SelectedCommand(), ...) touches these directly -
+    // MatchResult below carries its own copy of whatever a row needs
+    // to display/launch, precisely so the lock only ever has to cover
+    // UpdateMatches() itself. ---
+    std::mutex m_indexMutex;
+    std::vector<IndexedApp> m_index;
+    std::vector<FileEntry> m_files;
+    std::string m_folderIconPath; // resolved once per rebuild, for FileEntry rows
+    std::string m_fileIconPath;
 
-std::vector<MatchResult> m_matches;
-std::size_t m_selectedIndex = 0;
-std::size_t m_scrollOffset = 0;
-std::unordered_map<std::string, Pixmap> m_iconCache;
-std::unordered_map<std::string, int> m_launchCounts;
-std::vector<FileEntry> m_files;
-Pixmap m_folderIconPixmap = 0;
-Pixmap m_fileIconPixmap = 0;
-Pixmap m_folderIconMask = 0;
-Pixmap m_fileIconMask = 0;
-void LoadLaunchHistory();
-void SaveLaunchHistory();
+    std::thread m_buildThread;
+    bool m_indexRequested = false; // Configure() only kicks off the first background build once
 
-int CalculateFinalScore(
-    const LauncherEntry& app,
-    int baseScore) const;
-int VisibleRows() const;
+    HistoryStore m_history;
+
+    // Resolved Pixmap/mask for a given icon path, shared by
+    // application, folder and generic-file icons alike - most systems
+    // have far fewer distinct icon files than distinct applications
+    // (many apps fall back to the same generic icon), so keying by
+    // path here also naturally deduplicates that decoding work.
+    std::unordered_map<std::string, Pixmap> m_iconCache;
+    std::unordered_map<std::string, Pixmap> m_iconMaskCache;
+
+    enum class MatchType
+    {
+        Application,
+        File,
+        Internet
+    };
+
+    // Self-contained: everything Redraw()/SelectedCommand()/
+    // SelectedPath() need for one result row, copied out of
+    // m_index/m_files (or built directly, for Internet rows) while
+    // UpdateMatches() holds m_indexMutex - see the comment on
+    // m_indexMutex above for why.
+    struct MatchResult
+    {
+        MatchType type;
+        std::string label;       // what Redraw() draws
+        std::string command;     // Application/Internet - what SelectedCommand() returns
+        std::string path;        // File - what SelectedPath() returns
+        std::string desktopId;   // Application - what gets passed to HistoryStore::RecordLaunch()
+        std::string iconPath;    // resolved icon path, or "" for no icon
+        bool isDirectory = false;
+        int score = 0;
+        bool priority = false;   // Internet only - a recognized smart prefix always sorts first
+    };
+
+    std::vector<MatchResult> m_matches;
+    std::size_t m_selectedIndex = 0;
+    std::size_t m_scrollOffset = 0;
+
+    // launcher.* config, resolved once in Configure() - see
+    // default.conf's LAUNCHER section for what each one does.
+    bool m_internetSearchEnabled = true;
+    bool m_searchWhenNoResults = true;
+    std::string m_defaultSearchEngine = "duckduckgo";
+    std::string m_fallbackSearchEngine = "google";
+    std::string m_customSearchUrl;
+    bool m_showHiddenApps = false;
+    bool m_strictFiltering = true;
+
+    int VisibleRows() const;
 };
 
 }

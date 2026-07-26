@@ -18,7 +18,6 @@ find_package(X11 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(Xft REQUIRED IMPORTED_TARGET xft fontconfig)
 pkg_check_modules(Imlib2 REQUIRED IMPORTED_TARGET imlib2)
-pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
 
 # --- kohiko: the window manager ------------------------------------------------
 
@@ -26,7 +25,7 @@ file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 
 add_executable(kohiko ${KOHIKO_SOURCES})
 target_include_directories(kohiko PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
-target_link_libraries(kohiko PRIVATE ${X11_LIBRARIES} PkgConfig::Xft PkgConfig::Imlib2 PkgConfig::GTK3)
+target_link_libraries(kohiko PRIVATE ${X11_LIBRARIES} PkgConfig::Xft PkgConfig::Imlib2)
 target_compile_options(kohiko PRIVATE -Wall -Wextra)
 
 # Multi-monitor geometry via XRandr, enabled only if it's actually
@@ -56,6 +55,16 @@ add_executable(test_bsptree
 )
 target_include_directories(test_bsptree PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME BSPTree COMMAND test_bsptree)
+
+# Pure string/data-structure logic, same as test_bsptree above - no
+# X11 display needed.
+add_executable(test_launcherscoring
+    tests/test_launcherscoring.cpp
+    src/LauncherScoring.cpp
+    src/Utils.cpp
+)
+target_include_directories(test_launcherscoring PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME LauncherScoring COMMAND test_launcherscoring)
 
 # Needs a real X11/XRandR connection (skips its X-dependent checks
 # gracefully if $DISPLAY isn't set - see the file for why) - the same

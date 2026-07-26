@@ -93,6 +93,32 @@ bool IsUtf8Continuation(unsigned char c)
 
 }
 
+std::vector<std::string> Split(
+    const std::string& value,
+    char separator)
+{
+    std::vector<std::string> tokens;
+
+    std::size_t pos = 0;
+
+    while (pos <= value.size())
+    {
+        std::size_t end = value.find(separator, pos);
+
+        if (end == std::string::npos)
+            end = value.size();
+
+        std::string token = Trim(value.substr(pos, end - pos));
+
+        if (!token.empty())
+            tokens.push_back(std::move(token));
+
+        pos = end + 1;
+    }
+
+    return tokens;
+}
+
 std::size_t Utf8PrevBoundary(
     const std::string& value,
     std::size_t pos)

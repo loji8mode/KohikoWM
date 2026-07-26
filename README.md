@@ -43,16 +43,17 @@ a full compositor.
 
 ## Building
 
-You need a C++20 compiler and the X11 development headers, plus GTK3 and
-Imlib2 (icon-theme lookup and icon rendering for the launcher - see
-`scripts/install-arch.sh`'s dependency comments for exactly where each one
-is used) and Xft/fontconfig (text rendering - see
-[Fonts and languages](#fonts-and-languages)). There's no Qt or compositor
-dependency of any kind, and no toolkit is used for the bar/launcher/
-notepad's own UI - just plain Xlib shapes plus Xft text.
+You need a C++20 compiler and the X11 development headers, plus Imlib2
+(icon loading and rendering for the launcher/notepad - icon-theme *lookup*
+is Kohiko's own freedesktop Icon Theme Specification implementation, see
+`include/IconResolver.h`, so no toolkit dependency is needed for that) and
+Xft/fontconfig (text rendering - see
+[Fonts and languages](#fonts-and-languages)). There's no Qt, GTK, or
+compositor dependency of any kind, and no toolkit is used for the
+bar/launcher/notepad's own UI - just plain Xlib shapes plus Xft text.
 
 ```sh
-sudo apt install build-essential libx11-dev libgtk-3-dev libimlib2-dev \
+sudo apt install build-essential libx11-dev libimlib2-dev \
                   libxft-dev libfontconfig-dev fonts-dejavu-core
 # optional, for multi-monitor geometry:
 sudo apt install libxrandr-dev
@@ -87,7 +88,7 @@ scripts/install-arch.sh
 ```
 
 Installs every pacman dependency Kohiko needs (`base-devel`, `libx11`,
-`libxrandr`, `imlib2`, `gtk3`, `xorg-fonts-misc`, `xorg-server`), builds
+`libxrandr`, `imlib2`, `xorg-fonts-misc`, `xorg-server`), builds
 with `make -j$(nproc)`, runs `sudo make install`, drops a default config
 in `~/.config/kohiko` if you don't have one yet, and registers Kohiko as
 a session: an `xsessions` `.desktop` entry so it shows up in your display

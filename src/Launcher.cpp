@@ -1,16 +1,20 @@
 #include "Launcher.h"
 
+#include "AppIndex.h"
 #include "Config.h"
+#include "IconResolver.h"
+#include "LauncherScoring.h"
 #include "Utils.h"
 #include "XConnection.h"
 
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <Imlib2.h>
-#include <gtk/gtk.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -23,148 +27,237 @@
 
 namespace Kohiko
 {
-    namespace
+
+namespace
 {
 
-    int GetPopularityScore(
-    const LauncherEntry& entry)
+int GetPopularityScore(
+    const IndexedApp& app)
 {
-    for (const auto& app : GlobalPopularity)
+    for (const auto& entry : GlobalPopularity)
     {
         bool desktopMatch =
-            !app.desktopId.empty() &&
-            entry.desktopId == app.desktopId;
+            !entry.desktopId.empty() &&
+            app.desktopId == entry.desktopId;
 
         bool execMatch =
-            !app.execContains.empty() &&
-            entry.exec.find(app.execContains)
-                != std::string::npos;
+            !entry.execContains.empty() &&
+            app.exec.find(entry.execContains) != std::string::npos;
 
         if (desktopMatch || execMatch)
-        {
-            return app.popularity;
-        }
+            return entry.popularity;
     }
 
-    for (const auto& app : PenaltyPrograms)
+    for (const auto& entry : PenaltyPrograms)
     {
         bool desktopMatch =
-            !app.desktopId.empty() &&
-            entry.desktopId == app.desktopId;
+            !entry.desktopId.empty() &&
+            app.desktopId == entry.desktopId;
 
         bool execMatch =
-            !app.execContains.empty() &&
-            entry.exec.find(app.execContains)
-                != std::string::npos;
+            !entry.execContains.empty() &&
+            app.exec.find(entry.execContains) != std::string::npos;
 
         if (desktopMatch || execMatch)
-        {
-            return app.popularity;
-        }
+            return entry.popularity;
     }
 
     return 0;
 }
 
-static const char* kHistoryFile =
-    "/tmp/kohiko_launcher_history";
+// Bullet 12, "Recently launched bonus" - a simple tiered boost on top
+// of HistoryStore's own continuous favoriteScore, so something
+// launched a few minutes ago visibly jumps to the top even before
+// its favoriteScore has had a chance to accumulate from repeat use.
+int RecencyBonus(
+    long long lastLaunchEpoch)
+{
+    if (lastLaunchEpoch <= 0)
+        return 0;
 
-static bool IsSubsequence(
-    const std::string& query,
+    long long now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+
+    long long secondsAgo = now - lastLaunchEpoch;
+
+    if (secondsAgo < 3600) return 150;         // last hour
+    if (secondsAgo < 86400) return 80;         // last day
+    if (secondsAgo < 7 * 86400) return 30;     // last week
+
+    return 0;
+}
+
+// --- CONFIGURABLE INTERNET SEARCH -------------------------------
+//
+// Every engine Kohiko knows a URL template for out of the box, plus
+// "custom" (handled separately in BuildSearchUrl - it reads
+// `launcher.custom_search_url` instead of one of these). Which engine
+// actually gets used - default/fallback, or a smart prefix like
+// "yt " - is entirely config-driven; nothing here is hardcoded as
+// *the* search engine, just as one of several options.
+
+struct SearchEngine
+{
+    const char* id;
+    const char* displayName;
+    const char* urlTemplate; // "{q}" is replaced with the URL-encoded query
+};
+
+constexpr std::array<SearchEngine, 7> kSearchEngines =
+{{
+    {"google",     "Google",       "https://www.google.com/search?q={q}"},
+    {"duckduckgo", "DuckDuckGo",   "https://duckduckgo.com/?q={q}"},
+    {"brave",      "Brave Search", "https://search.brave.com/search?q={q}"},
+    {"wikipedia",  "Wikipedia",    "https://en.wikipedia.org/w/index.php?search={q}"},
+    {"archwiki",   "Arch Wiki",    "https://wiki.archlinux.org/index.php?search={q}"},
+    {"github",     "GitHub",       "https://github.com/search?q={q}"},
+    {"youtube",    "YouTube",      "https://www.youtube.com/results?search_query={q}"},
+}};
+
+// SMART SEARCH: a recognized leading word always routes to that exact
+// engine, regardless of `launcher.default_search_engine` - typing
+// "yt cats" means YouTube, not whatever the default happens to be.
+struct SmartPrefix
+{
+    const char* prefix;
+    const char* engineId;
+};
+
+constexpr std::array<SmartPrefix, 4> kSmartPrefixes =
+{{
+    {"yt", "youtube"},
+    {"wiki", "wikipedia"},
+    {"arch", "archwiki"},
+    {"gh", "github"},
+}};
+
+std::string UrlEncode(
     const std::string& text)
 {
-    std::size_t q = 0;
+    static constexpr char kHex[] = "0123456789ABCDEF";
 
-    for (char c : text)
+    std::string encoded;
+    encoded.reserve(text.size() * 3);
+
+    for (unsigned char c : text)
     {
-        if (q < query.size() &&
-            std::tolower(c) ==
-            std::tolower(query[q]))
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+            encoded += static_cast<char>(c);
+        else
         {
-            ++q;
+            encoded += '%';
+            encoded += kHex[c >> 4];
+            encoded += kHex[c & 0x0F];
         }
     }
 
-    return q == query.size();
+    return encoded;
 }
 
-int CalculateScore(
+const SearchEngine* FindEngine(
+    const std::string& id)
+{
+    std::string lower = Utils::Lower(id);
+
+    for (const auto& engine : kSearchEngines)
+    {
+        if (lower == engine.id)
+            return &engine;
+    }
+
+    return nullptr;
+}
+
+// Builds the full URL for `engineId` searching `query`, honouring
+// `customUrl` (`launcher.custom_search_url`) when engineId is
+// "custom". Returns "" for an unrecognized engine id (e.g. a typo in
+// default_search_engine=) rather than guessing - BuildInternetMatches()
+// just skips adding a row for it in that case.
+std::string BuildSearchUrl(
+    const std::string& engineId,
     const std::string& query,
-    const std::string& name,
-    int launchCount,
-    int popularity)
+    const std::string& customUrl)
 {
-    std::string lowerName = name;
-    std::string lowerQuery = query;
+    std::string encoded = UrlEncode(query);
 
-    // ::tolower takes an int that must be representable as unsigned
-    // char (or EOF) - passing a plain (signed) char straight through
-    // is undefined behaviour for any UTF-8 continuation/lead byte
-    // (anything >= 0x80), which any non-ASCII app name or query will
-    // contain. Casting through unsigned char first keeps ASCII
-    // lowercasing correct and leaves multi-byte bytes untouched
-    // instead of invoking UB.
-    auto toLowerByte = [](unsigned char c)
+    if (Utils::Lower(engineId) == "custom")
     {
-        return static_cast<char>(std::tolower(c));
-    };
+        if (customUrl.empty())
+            return "";
 
-    std::transform(
-        lowerName.begin(),
-        lowerName.end(),
-        lowerName.begin(),
-        toLowerByte);
+        std::size_t placeholder = customUrl.find("{query}");
 
-    std::transform(
-        lowerQuery.begin(),
-        lowerQuery.end(),
-        lowerQuery.begin(),
-        toLowerByte);
+        if (placeholder == std::string::npos)
+            return customUrl + encoded; // no placeholder given - just append, e.g. a URL already ending in "?q="
 
-    if (query.empty())
-    {
-        return popularity +
-               launchCount * 50 -
-               static_cast<int>(lowerName.length());
+        std::string url = customUrl;
+        url.replace(placeholder, std::string("{query}").size(), encoded);
+        return url;
     }
 
-    int score = 0;
+    const SearchEngine* engine = FindEngine(engineId);
 
-    if (lowerName == lowerQuery)
-    {
-        score += 10000;
-    }
-    else if (lowerName.starts_with(lowerQuery))
-    {
-        score += 5000;
-    }
-    else
-{
-    auto pos = lowerName.find(lowerQuery);
+    if (!engine)
+        return "";
 
-    if (pos != std::string::npos)
-    {
-        score += 1000 - static_cast<int>(pos);
-    }
-    else if (IsSubsequence(
-                 lowerQuery,
-                 lowerName))
-    {
-        score += 2000;
-    }
-    else
-    {
-        return -1;
-    }
+    std::string url = engine->urlTemplate;
+    std::size_t placeholder = url.find("{q}");
+
+    if (placeholder != std::string::npos)
+        url.replace(placeholder, 3, encoded);
+
+    return url;
 }
 
-    score += popularity;
-    score += launchCount * 50;
+std::string DisplayNameForEngine(
+    const std::string& engineId)
+{
+    if (Utils::Lower(engineId) == "custom")
+        return "the web";
 
-    // коротші назви мають невелику перевагу
-    score -= static_cast<int>(lowerName.length());
+    const SearchEngine* engine = FindEngine(engineId);
+    return engine ? engine->displayName : engineId;
+}
 
-    return score;
+// $HOME file index - unchanged in spirit from the previous
+// implementation (a flat recursive walk, matched by name only), just
+// extracted into its own function so it can run on the background
+// thread instead of blocking Configure()/ReloadDesktopEntries().
+std::vector<FileEntry> ScanHomeFiles()
+{
+    namespace fs = std::filesystem;
+
+    std::vector<FileEntry> files;
+
+    const char* home = std::getenv("HOME");
+
+    if (!home)
+        return files;
+
+    try
+    {
+        for (const auto& entry : fs::recursive_directory_iterator(home))
+        {
+            if (!entry.is_regular_file() && !entry.is_directory())
+                continue;
+
+            FileEntry file;
+            file.path = entry.path().string();
+            file.name = entry.path().filename().string();
+            file.isDirectory = entry.is_directory();
+
+            files.push_back(std::move(file));
+        }
+    }
+    catch (...)
+    {
+        // A permission-denied subtree, a symlink loop, ... - keep
+        // whatever was collected before the exception rather than
+        // discarding the whole scan.
+    }
+
+    return files;
 }
 
 }
@@ -174,20 +267,18 @@ Launcher::Launcher(
     :
     m_connection(connection)
 {
-    
-
-    static bool gtkInitialized = false;
-
-    if (!gtkInitialized)
-    {
-        gtk_init(nullptr, nullptr);
-        gtkInitialized = true;
-        LoadLaunchHistory();
-    }
 }
 
 Launcher::~Launcher()
 {
+    // The background thread never touches X11/Imlib2 (see
+    // RebuildIndexAndFiles) - joining here just waits for any in-
+    // flight index/file rebuild to finish, which in the overwhelming
+    // majority of cases has already happened long before Kohiko
+    // shuts down.
+    if (m_buildThread.joinable())
+        m_buildThread.join();
+
     Display* display = m_connection.GetDisplay();
 
     if (!display)
@@ -195,21 +286,15 @@ Launcher::~Launcher()
 
     for (auto& [path, pixmap] : m_iconCache)
     {
-    if (pixmap)
-        XFreePixmap(display, pixmap);
+        if (pixmap)
+            XFreePixmap(display, pixmap);
     }
 
-    if (m_folderIconPixmap)
-        XFreePixmap(display, m_folderIconPixmap);
-
-    if (m_fileIconPixmap)
-        XFreePixmap(display, m_fileIconPixmap);
-
-    if (m_folderIconMask)
-        XFreePixmap(display, m_folderIconMask);
-
-    if (m_fileIconMask)
-        XFreePixmap(display, m_fileIconMask);
+    for (auto& [path, mask] : m_iconMaskCache)
+    {
+        if (mask)
+            XFreePixmap(display, mask);
+    }
 
     if (m_xic)
         XDestroyIC(m_xic);
@@ -267,6 +352,16 @@ void Launcher::Configure(
     m_foregroundPixel  = std::strtoul(config.GetString("bar.foreground", "0xcdd6f4").c_str(), nullptr, 0);
     m_borderPixel      = std::strtoul(config.GetString("general.border_color_active", "0x89b4fa").c_str(), nullptr, 0);
     m_placeholderPixel = std::strtoul(config.GetString("general.border_color_inactive", "0x45475a").c_str(), nullptr, 0);
+
+    // --- SEARCH ENGINE / DESKTOP FILE QUALITY / CONFIGURABLE
+    // INTERNET SEARCH config - see default.conf's LAUNCHER section. ---
+    m_showHiddenApps        = config.GetBool("launcher.show_hidden", false);
+    m_strictFiltering       = config.GetBool("launcher.strict_filtering", true);
+    m_internetSearchEnabled = config.GetBool("launcher.internet_search", true);
+    m_searchWhenNoResults   = config.GetBool("launcher.search_when_no_results", true);
+    m_defaultSearchEngine   = config.GetString("launcher.default_search_engine", "duckduckgo");
+    m_fallbackSearchEngine  = config.GetString("launcher.fallback_search_engine", "google");
+    m_customSearchUrl       = config.GetString("launcher.custom_search_url", "");
 
     if (m_window == 0)
     {
@@ -333,11 +428,12 @@ void Launcher::Configure(
         XSetWindowBackground(display, m_window, m_backgroundPixel);
         XSetWindowBorder(display, m_window, m_borderPixel);
     }
-    if (!m_entriesLoaded)
-{
-    LoadDesktopEntries();
-    BuildFileIndex();
-}
+
+    if (!m_indexRequested)
+    {
+        m_indexRequested = true;
+        StartIndexRebuild();
+    }
 }
 
 void Launcher::Open()
@@ -392,49 +488,36 @@ std::string Launcher::SelectedCommand()
     if (m_selectedIndex >= m_matches.size())
         return "";
 
-    const auto& match =
-        m_matches[m_selectedIndex];
+    const MatchResult& match = m_matches[m_selectedIndex];
 
     if (match.type == MatchType::File)
-    {
-        return "";
-    }
-
-    if (match.index >= m_entries.size())
         return "";
 
-    const auto& app =
-        m_entries[match.index];
+    if (match.type == MatchType::Application)
+        m_history.RecordLaunch(match.desktopId);
 
-    m_launchCounts[app.name]++;
-
-    SaveLaunchHistory();
-
-    return app.exec;
+    return match.command;
 }
 
 bool Launcher::SelectedIsFile() const
 {
-    if (m_matches.empty())
+    if (m_matches.empty() || m_selectedIndex >= m_matches.size())
         return false;
 
-    return
-        m_matches[m_selectedIndex].type ==
-        MatchType::File;
+    return m_matches[m_selectedIndex].type == MatchType::File;
 }
 
 std::string Launcher::SelectedPath()
 {
-    if (m_matches.empty())
+    if (m_matches.empty() || m_selectedIndex >= m_matches.size())
         return "";
 
-    const auto& match =
-        m_matches[m_selectedIndex];
+    const MatchResult& match = m_matches[m_selectedIndex];
 
     if (match.type != MatchType::File)
         return "";
 
-    return m_files[match.index].path;
+    return match.path;
 }
 
 LauncherResult Launcher::HandleKeyPress(
@@ -475,45 +558,34 @@ LauncherResult Launcher::HandleKeyPress(
         len = 0;
 
     switch (keysym)
-    {   
+    {
         case XK_Up:
-{
-    if (!m_matches.empty() &&
-        m_selectedIndex > 0)
-    {
-        --m_selectedIndex;
-
-        if (m_selectedIndex <
-            m_scrollOffset)
         {
-            m_scrollOffset =
-                m_selectedIndex;
-        }
-    }
+            if (!m_matches.empty() && m_selectedIndex > 0)
+            {
+                --m_selectedIndex;
 
-    Redraw();
-    return LauncherResult::Editing;
-}
+                if (m_selectedIndex < m_scrollOffset)
+                    m_scrollOffset = m_selectedIndex;
+            }
 
-case XK_Down:
-{
-    if (!m_matches.empty() &&
-        m_selectedIndex + 1 < m_matches.size())
-    {
-        ++m_selectedIndex;
-
-        if (m_selectedIndex >=
-            m_scrollOffset +
-            static_cast<std::size_t>(VisibleRows()))
-        {
-            ++m_scrollOffset;
+            Redraw();
+            return LauncherResult::Editing;
         }
 
-    }
+        case XK_Down:
+        {
+            if (!m_matches.empty() && m_selectedIndex + 1 < m_matches.size())
+            {
+                ++m_selectedIndex;
 
-    Redraw();
-    return LauncherResult::Editing;
-}
+                if (m_selectedIndex >= m_scrollOffset + static_cast<std::size_t>(VisibleRows()))
+                    ++m_scrollOffset;
+            }
+
+            Redraw();
+            return LauncherResult::Editing;
+        }
 
         case XK_Escape:
             return LauncherResult::Cancelled;
@@ -625,13 +697,8 @@ void Launcher::HandleButtonPress(
     {
         std::size_t maxOffset = 0;
 
-        if (m_matches.size() >
-            static_cast<std::size_t>(VisibleRows()))
-        {
-            maxOffset =
-                m_matches.size() -
-                VisibleRows();
-        }
+        if (m_matches.size() > static_cast<std::size_t>(VisibleRows()))
+            maxOffset = m_matches.size() - VisibleRows();
 
         if (m_scrollOffset < maxOffset)
         {
@@ -682,10 +749,7 @@ void Launcher::Redraw()
         std::string visible = m_query;
 
         if (m_caretOn)
-            visible.insert(
-                visible.begin() +
-                static_cast<long>(m_cursor),
-                '|');
+            visible.insert(visible.begin() + static_cast<long>(m_cursor), '|');
 
         if (m_xftDraw)
         {
@@ -694,10 +758,7 @@ void Launcher::Redraw()
         }
     }
 
-    XSetForeground(
-        display,
-        m_gc,
-        m_placeholderPixel);
+    XSetForeground(display, m_gc, m_placeholderPixel);
 
     XDrawLine(
         display,
@@ -712,24 +773,15 @@ void Launcher::Redraw()
     int lineHeight = 20;
     int bottomPadding = -100;
 
-    int visibleRows =
-        (m_geometry.height - y - bottomPadding)
-        / lineHeight;
+    int visibleRows = (m_geometry.height - y - bottomPadding) / lineHeight;
 
-    std::size_t lastVisibleIndex =
-        std::min(
-            m_matches.size(),
-            m_scrollOffset +
-            static_cast<std::size_t>(visibleRows));
+    std::size_t lastVisibleIndex = std::min(
+        m_matches.size(),
+        m_scrollOffset + static_cast<std::size_t>(visibleRows));
 
-    for (std::size_t i = m_scrollOffset;
-         i < lastVisibleIndex;
-         ++i)
+    for (std::size_t i = m_scrollOffset; i < lastVisibleIndex; ++i)
     {
-        int drawY =
-            y +
-            static_cast<int>(i - m_scrollOffset)
-            * lineHeight;
+        int drawY = y + static_cast<int>(i - m_scrollOffset) * lineHeight;
 
         // Selected rows draw their label in the background colour
         // (for contrast against the highlight rectangle below) - the
@@ -755,278 +807,274 @@ void Launcher::Redraw()
             textPixel = m_backgroundPixel;
         }
 
-        const auto& match =
-            m_matches[i];
+        const MatchResult& match = m_matches[i];
 
-        std::string label;
+        // One lookup path for every row type: Application rows carry
+        // their app's resolved icon path, File rows carry the shared
+        // folder/generic-file path, Internet rows carry "" - which
+        // ResolveIconPixmap() turns into {0, 0}, so this simply draws
+        // nothing for them without needing a type check here at all.
+        Pixmap iconMask = 0;
+        Pixmap iconPixmap = ResolveIconPixmap(match.iconPath, iconMask);
 
-        if (match.type ==
-            MatchType::Application)
+        if (iconPixmap)
         {
-            label = m_entries[match.index].name;
-        }
-        else
-        {
-            label =
-                m_files[match.index].name;
-        }
+            int iconX = 12;
+            int iconY = drawY - 14;
 
-        if (match.type ==
-            MatchType::Application)
-        {
-            const auto& app =
-                m_entries[match.index];
-
-            if (app.iconPixmap)
+            if (iconMask)
             {
-                int iconX = 12;
-                int iconY = drawY - 14;
-
-                if (app.iconMask)
-                {
-                    XSetClipMask(display, m_gc, app.iconMask);
-                    XSetClipOrigin(display, m_gc, iconX, iconY);
-                }
-
-                XCopyArea(
-                    display,
-                    app.iconPixmap,
-                    m_window,
-                    m_gc,
-                    0,
-                    0,
-                    20,
-                    20,
-                    iconX,
-                    iconY);
-
-                if (app.iconMask)
-                    XSetClipMask(display, m_gc, None);
+                XSetClipMask(display, m_gc, iconMask);
+                XSetClipOrigin(display, m_gc, iconX, iconY);
             }
-        }
-        else
-        {
-            Pixmap fileTypeIcon =
-                m_files[match.index].isDirectory ?
-                m_folderIconPixmap :
-                m_fileIconPixmap;
 
-            Pixmap fileTypeMask =
-                m_files[match.index].isDirectory ?
-                m_folderIconMask :
-                m_fileIconMask;
+            XCopyArea(
+                display,
+                iconPixmap,
+                m_window,
+                m_gc,
+                0,
+                0,
+                20,
+                20,
+                iconX,
+                iconY);
 
-            if (fileTypeIcon)
-            {
-                int iconX = 12;
-                int iconY = drawY - 14;
-
-                if (fileTypeMask)
-                {
-                    XSetClipMask(display, m_gc, fileTypeMask);
-                    XSetClipOrigin(display, m_gc, iconX, iconY);
-                }
-
-                XCopyArea(
-                    display,
-                    fileTypeIcon,
-                    m_window,
-                    m_gc,
-                    0,
-                    0,
-                    20,
-                    20,
-                    iconX,
-                    iconY);
-
-                if (fileTypeMask)
-                    XSetClipMask(display, m_gc, None);
-            }
+            if (iconMask)
+                XSetClipMask(display, m_gc, None);
         }
 
         if (m_xftDraw)
         {
             TextColor color(display, visual, colormap, textPixel);
-            m_font.DrawString(m_xftDraw, padding + 28, drawY, label, color.Get());
+            m_font.DrawString(m_xftDraw, padding + 28, drawY, match.label, color.Get());
         }
     }
 
     XFlush(display);
 }
-void Launcher::LoadDesktopEntries()
+
+void Launcher::UpdateMatches()
 {
-    namespace fs = std::filesystem;
+    m_matches.clear();
+    m_scrollOffset = 0;
 
-    // ReloadDesktopEntries() throws away every LauncherEntry below and
-    // rebuilds the list from scratch - free the icon resources the
-    // old entries were holding onto first, or every reload would leak
-    // one Pixmap and one mask per application into the X server for
-    // as long as Kohiko keeps running.
-    if (Display* display = m_connection.GetDisplay())
+    std::string queryLower = Utils::Lower(m_query);
+
     {
-        for (const auto& app : m_entries)
+        std::lock_guard<std::mutex> lock(m_indexMutex);
+
+        for (const auto& app : m_index)
         {
-            if (app.iconPixmap)
-                XFreePixmap(display, app.iconPixmap);
+            Scoring::Bonuses bonuses;
+            bonuses.popularityBonus = GetPopularityScore(app);
 
-            if (app.iconMask)
-                XFreePixmap(display, app.iconMask);
-        }
-    }
+            if (const HistoryRecord* history = m_history.Find(app.desktopId))
+            {
+                // Bullet 10, "Launch history bonus".
+                bonuses.launchCountBonus = std::min(300, history->launchCount * 15);
 
-    m_entries.clear();
+                // HistoryStore's blended frecency signal, folded in as
+                // its own small bonus (see HistoryStore::RecordLaunch).
+                bonuses.favoriteBonus = static_cast<int>(std::min(150.0, history->favoriteScore * 10.0));
 
-    const std::vector<std::string> dirs =
-    {
-        "/usr/share/applications"
-    };
+                bonuses.recencyBonus = RecencyBonus(history->lastLaunchEpoch);
+            }
 
-    for (const auto& dir : dirs)
-    {
-        if (!fs::exists(dir))
-            continue;
+            int score = Scoring::ScoreApp(app, queryLower, bonuses);
 
-        for (const auto& entry : fs::directory_iterator(dir))
-        {
-            if (entry.path().extension() != ".desktop")
+            if (score == Scoring::kNoMatch)
                 continue;
 
-            LauncherEntry app;
-            app.desktopId =
-    entry.path().stem().string();
-    
-
-std::ifstream file(entry.path());
-
-std::string line;
-
-bool inDesktopEntry = false;
-
-while (std::getline(file, line))
-{
-    if (line == "[Desktop Entry]")
-    {
-        inDesktopEntry = true;
-        continue;
-    }
-
-    if (!line.empty() &&
-        line[0] == '[')
-    {
-        inDesktopEntry = false;
-        continue;
-    }
-
-    if (!inDesktopEntry)
-    {
-        continue;
-    }
-
-    if (line.starts_with("Name="))
-    {
-        if (line.size() > 5)
-            app.name = line.substr(5);
-    }
-    else if (line.starts_with("Icon="))
-    {
-    if (line.size() > 5)
-        app.icon = line.substr(5);
-    }
-    else if (line.starts_with("Exec="))
-    {
-        if (line.size() > 5)
-            app.exec = line.substr(5);
-
-        const char* fields[] =
-        {
-            "%u",
-            "%U",
-            "%f",
-            "%F",
-            "%i",
-            "%c",
-            "%k"
-        };
-
-        for (const char* field : fields)
-        {
-            std::size_t pos = app.exec.find(field);
-
-            if (pos != std::string::npos)
-                app.exec.erase(pos);
+            MatchResult match;
+            match.type = MatchType::Application;
+            match.label = app.name;
+            match.command = app.exec;
+            match.desktopId = app.desktopId;
+            match.iconPath = app.iconPath;
+            match.score = score;
+            m_matches.push_back(std::move(match));
         }
 
-        while (!app.exec.empty() &&
-               std::isspace(static_cast<unsigned char>(app.exec.back())))
+        // Preserves the previous behaviour exactly: files only ever
+        // show up once something has actually been typed, never as
+        // part of the empty-query "list everything" view.
+        if (!m_query.empty())
         {
-            app.exec.pop_back();
+            for (const auto& file : m_files)
+            {
+                int score = Scoring::BestFieldMatch(queryLower, Utils::Lower(file.name));
+
+                if (score == Scoring::kNoMatch)
+                    continue;
+
+                MatchResult match;
+                match.type = MatchType::File;
+                match.label = file.name;
+                match.path = file.path;
+                match.isDirectory = file.isDirectory;
+                match.iconPath = file.isDirectory ? m_folderIconPath : m_fileIconPath;
+                match.score = score;
+                m_matches.push_back(std::move(match));
+            }
         }
     }
-}
-if (!app.name.empty())
-{
-    app.iconPath =
-        FindIconPath(app.icon);
 
-    if (!app.iconPath.empty())
-{
-    app.iconPixmap =
-        LoadIcon(app.iconPath, app.iconMask);
-}
+    BuildInternetMatches(!m_matches.empty());
 
-    m_entries.push_back(app);
-}
-        }
-    }
-    std::printf(
-    "Loaded %zu applications\n",
-    m_entries.size());
-    for (const auto& app : m_entries)
-{
-    if (!app.icon.empty())
+    std::sort(
+        m_matches.begin(),
+        m_matches.end(),
+        [](const MatchResult& a, const MatchResult& b)
+        {
+            // A recognized smart-search prefix ("yt cats") is an
+            // explicit, unambiguous request - it always wins, even
+            // over an Application match.
+            if (a.priority != b.priority)
+                return a.priority;
+
+            // Otherwise: Application, then File, then Internet - the
+            // enum is declared in exactly that order for this reason.
+            if (a.type != b.type)
+                return static_cast<int>(a.type) < static_cast<int>(b.type);
+
+            return a.score > b.score;
+        });
+
+    if (m_selectedIndex >= m_matches.size())
     {
-        std::printf(
-            "%s -> %s\n",
-            app.name.c_str(),
-            app.icon.c_str());
+        m_selectedIndex = 0;
+        m_scrollOffset = 0;
     }
 }
-m_entriesLoaded = true;
+
+void Launcher::BuildInternetMatches(
+    bool haveLocalResults)
+{
+    if (!m_internetSearchEnabled || m_query.empty())
+        return;
+
+    // SMART SEARCH: a recognized leading word ("yt cats", "wiki x11",
+    // ...) always offers that engine, whether or not local results
+    // exist - it's a deliberate request, not a fallback.
+    std::size_t space = m_query.find(' ');
+
+    if (space != std::string::npos && space > 0)
+    {
+        std::string prefix = Utils::Lower(m_query.substr(0, space));
+        std::string rest = Utils::Trim(m_query.substr(space + 1));
+
+        if (!rest.empty())
+        {
+            for (const auto& mapping : kSmartPrefixes)
+            {
+                if (prefix != mapping.prefix)
+                    continue;
+
+                AddInternetMatch(mapping.engineId, rest, /*priority=*/true);
+                return; // unambiguous - no need to also offer a fallback suggestion below
+            }
+        }
+    }
+
+    // Otherwise: only offer to search the web when there's nothing
+    // useful to show locally, and only if configured to do so.
+    if (haveLocalResults || !m_searchWhenNoResults)
+        return;
+
+    AddInternetMatch(m_defaultSearchEngine, m_query, false);
+
+    if (!m_fallbackSearchEngine.empty() && m_fallbackSearchEngine != m_defaultSearchEngine)
+        AddInternetMatch(m_fallbackSearchEngine, m_query, false);
 }
 
-std::string Launcher::FindIconPath(
-    const std::string& iconName)
+void Launcher::AddInternetMatch(
+    const std::string& engineId,
+    const std::string& queryText,
+    bool priority)
 {
-    if (iconName.empty())
-        return "";
+    std::string url = BuildSearchUrl(engineId, queryText, m_customSearchUrl);
 
-    if (iconName.starts_with("/"))
-        return iconName;
+    if (url.empty())
+        return; // unrecognized engine id and no usable custom URL - nothing sensible to offer
 
-    GtkIconTheme* theme =
-        gtk_icon_theme_get_default();
+    MatchResult match;
+    match.type = MatchType::Internet;
+    match.label = "Search " + DisplayNameForEngine(engineId) + " for \"" + queryText + "\"";
 
-    GtkIconInfo* info =
-        gtk_icon_theme_lookup_icon(
-            theme,
-            iconName.c_str(),
-            48,
-            GTK_ICON_LOOKUP_FORCE_SIZE);
+    // xdg-open (not a hardcoded browser) - whatever the person has
+    // set as their default handler for http(s) URLs opens it, exactly
+    // like clicking a link anywhere else on their system would.
+    // Wrapped in single quotes (sh disables all expansion inside
+    // them) rather than double - UrlEncode() never leaves a literal
+    // single quote in the URL, so this can't be broken out of.
+    match.command = "xdg-open '" + url + "'";
 
-    if (!info)
-        return "";
+    match.priority = priority;
+    match.score = priority ? 1000 : 0;
 
-    const char* filename =
-        gtk_icon_info_get_filename(info);
+    m_matches.push_back(std::move(match));
+}
 
-    std::string result;
+void Launcher::StartIndexRebuild()
+{
+    // In practice this is always already finished by the time a
+    // second rebuild is requested (ReloadDesktopEntries() is a rare,
+    // deliberate action) - join() just makes that a guarantee instead
+    // of an assumption, so there's never more than one thread writing
+    // m_index/m_files at once.
+    if (m_buildThread.joinable())
+        m_buildThread.join();
 
-    if (filename)
-        result = filename;
+    // Captured by value rather than read from `this` inside the
+    // thread - see RebuildIndexAndFiles()'s declaration for why.
+    bool includeHidden = m_showHiddenApps;
+    bool strictFiltering = m_strictFiltering;
 
-    g_object_unref(info);
+    m_buildThread = std::thread([this, includeHidden, strictFiltering]()
+    {
+        RebuildIndexAndFiles(includeHidden, strictFiltering);
+    });
+}
 
-    return result;
+void Launcher::RebuildIndexAndFiles(
+    bool includeHidden,
+    bool strictFiltering)
+{
+    std::vector<IndexedApp> apps;
+    std::vector<AppIndex::DirStamp> stamps;
+
+    // APPLICATION INDEX: only actually re-scan/re-parse every .desktop
+    // file when the cache is missing or one of the application
+    // directories has changed since it was written - otherwise this
+    // is just reading one small flat file.
+    if (AppIndex::LoadCache(apps, stamps) && AppIndex::IsFresh(stamps))
+    {
+        // cache hit - nothing to rescan
+    }
+    else
+    {
+        apps = AppIndex::Build(includeHidden, strictFiltering);
+        AppIndex::SaveCache(apps, AppIndex::CurrentDirStamps());
+    }
+
+    Scoring::PrepareForSearch(apps);
+
+    std::vector<FileEntry> files = ScanHomeFiles();
+
+    // A short-lived resolver is enough here - it's only ever asked
+    // for these same two generic icon names, and re-loading the
+    // theme chain once per (rare) rebuild costs nothing worth caching
+    // across calls for.
+    IconResolver iconResolver;
+    std::string folderIconPath = iconResolver.Resolve("folder");
+    std::string fileIconPath = iconResolver.Resolve("text-x-generic");
+
+    std::lock_guard<std::mutex> lock(m_indexMutex);
+    m_index = std::move(apps);
+    m_files = std::move(files);
+    m_folderIconPath = std::move(folderIconPath);
+    m_fileIconPath = std::move(fileIconPath);
 }
 
 Pixmap Launcher::LoadIcon(
@@ -1038,26 +1086,17 @@ Pixmap Launcher::LoadIcon(
     if (path.empty())
         return 0;
 
-    Display* display =
-        m_connection.GetDisplay();
+    Display* display = m_connection.GetDisplay();
 
-    Visual* visual =
-        DefaultVisual(
-            display,
-            m_connection.Screen());
-
-    Colormap colormap =
-        DefaultColormap(
-            display,
-            m_connection.Screen());
+    Visual* visual = DefaultVisual(display, m_connection.Screen());
+    Colormap colormap = DefaultColormap(display, m_connection.Screen());
 
     imlib_context_set_display(display);
     imlib_context_set_visual(visual);
     imlib_context_set_colormap(colormap);
     imlib_context_set_drawable(m_window);
 
-    Imlib_Image image =
-        imlib_load_image(path.c_str());
+    Imlib_Image image = imlib_load_image(path.c_str());
 
     if (!image)
         return 0;
@@ -1066,31 +1105,55 @@ Pixmap Launcher::LoadIcon(
 
     // Most icon themes hand out PNGs with an alpha channel (rounded
     // corners, transparent padding around a smaller glyph, etc).
-    // Rendering straight onto a freshly created Pixmap - as this used
-    // to do - ignores that alpha entirely and paints over whatever the
-    // Pixmap's memory happened to already contain, which on every
-    // system this was tested on reads back as solid black: every icon
-    // showed up with a black square behind it instead of blending into
-    // the Launcher's actual (dark) background.
+    // Rendering straight onto a freshly created Pixmap ignores that
+    // alpha entirely and paints over whatever the Pixmap's memory
+    // happened to already contain, which reads back as solid black:
+    // every icon would show up with a black square behind it instead
+    // of blending into the launcher's own (dark) background.
     //
-    // Asking Imlib2 for a 1-bit shape mask alongside the pixmap -
-    // instead of just a flat-rendered pixmap - lets Redraw() clip its
-    // XCopyArea to only the icon's own opaque pixels via XSetClipMask,
-    // so whatever is already drawn underneath (the plain background,
-    // or the selected-row highlight) shows through everywhere else.
-    // That's real per-pixel transparency without needing a compositor
-    // or an ARGB visual, which a plain core-Xlib window like this one
-    // doesn't have.
+    // Asking Imlib2 for a 1-bit shape mask alongside the pixmap - not
+    // just a flat-rendered pixmap - lets Redraw() clip its XCopyArea
+    // to only the icon's own opaque pixels via XSetClipMask, so
+    // whatever is already drawn underneath (the plain background, or
+    // the selected-row highlight) shows through everywhere else. Real
+    // per-pixel transparency without needing a compositor or an ARGB
+    // visual, which a plain core-Xlib window like this one doesn't have.
     Pixmap pixmap = 0;
     Pixmap mask = 0;
 
-    imlib_render_pixmaps_for_whole_image_at_size(
-        &pixmap,
-        &mask,
-        20,
-        20);
-
+    imlib_render_pixmaps_for_whole_image_at_size(&pixmap, &mask, 20, 20);
     imlib_free_image();
+
+    maskOut = mask;
+    return pixmap;
+}
+
+Pixmap Launcher::ResolveIconPixmap(
+    const std::string& iconPath,
+    Pixmap& maskOut)
+{
+    maskOut = 0;
+
+    if (iconPath.empty())
+        return 0;
+
+    if (auto it = m_iconCache.find(iconPath); it != m_iconCache.end())
+    {
+        maskOut = m_iconMaskCache[iconPath];
+        return it->second;
+    }
+
+    // First time this exact path has been drawn - decode/rasterize it
+    // now (this is the one piece of icon work that has to happen
+    // synchronously on the UI thread: Imlib2/X11 need a live Display
+    // connection, so it can't run on m_buildThread) and cache the
+    // result so every later row - this one redrawn again, or a
+    // different app that happens to share the icon - is free.
+    Pixmap mask = 0;
+    Pixmap pixmap = LoadIcon(iconPath, mask);
+
+    m_iconCache[iconPath] = pixmap;
+    m_iconMaskCache[iconPath] = mask;
 
     maskOut = mask;
     return pixmap;
@@ -1099,203 +1162,22 @@ Pixmap Launcher::LoadIcon(
 int Launcher::VisibleRows() const
 {
     int lineHeight = 20;
-
     int startY = 50;
 
-    return
-        (m_geometry.height - startY - 10)
-        / lineHeight;
-}
-
-void Launcher::UpdateMatches()
-{
-    m_matches.clear();
-    m_scrollOffset = 0;
-
-    for (std::size_t i = 0;
-         i < m_entries.size();
-         ++i)
-    {
-        if (m_query.empty())
-        {
-            m_matches.push_back(
-{
-    MatchType::Application,
-    i,
-    0
-});
-
-            continue;
-        }
-
-        int launches = 0;
-
-        auto it =
-            m_launchCounts.find(
-                m_entries[i].name);
-
-        if (it != m_launchCounts.end())
-{
-    launches = it->second;
-}
-
-int popularity = GetPopularityScore(m_entries[i]);
-
-int score = CalculateScore(
-    m_query,
-    m_entries[i].name,
-    launches,
-    popularity);
-
-        if (score >= 0)
-        {
-            m_matches.push_back(
-{
-    MatchType::Application,
-    i,
-    score
-});
-        }
-    } // <-- закінчився for
-
-    if (m_selectedIndex >=
-        m_matches.size())
-    {
-        m_selectedIndex = 0;
-        m_scrollOffset = 0;
-    }
-
-    for (std::size_t i = 0;
-     i < m_files.size();
-     ++i)
-{
-    int score =
-        CalculateScore(
-            m_query,
-            m_files[i].name,
-            0,
-            0);
-
-    if (score >= 0)
-    {
-        m_matches.push_back(
-        {
-            MatchType::File,
-            i,
-            score
-        });
-    }
-}
-
-std::sort(
-        m_matches.begin(),
-        m_matches.end(),
-        [](const MatchResult& a,
-           const MatchResult& b)
-        {
-            if (a.type != b.type)
-            {
-                return a.type == MatchType::Application;
-            }
-
-            return a.score > b.score;
-        });
-
-}
-
-void Launcher::LoadLaunchHistory()
-{
-    m_launchCounts.clear();
-
-    std::ifstream file(kHistoryFile);
-
-    std::string name;
-    int count;
-
-    while (file >> name >> count)
-    {
-        m_launchCounts[name] = count;
-    }
-}
-
-void Launcher::SaveLaunchHistory()
-{
-    std::ofstream file(kHistoryFile);
-
-    for (const auto& [name, count] : m_launchCounts)
-    {
-        file << name
-             << " "
-             << count
-             << "\n";
-    }
+    return (m_geometry.height - startY - 10) / lineHeight;
 }
 
 void Launcher::ReloadDesktopEntries()
 {
-    m_entriesLoaded = false;
-    LoadDesktopEntries();
-    BuildFileIndex();
+    // Runs on the background thread, same as the initial build - the
+    // currently-open (if any) result list keeps showing today's data
+    // until the next keystroke or the next Open(), at which point
+    // UpdateMatches() picks up whatever RebuildIndexAndFiles() has
+    // published by then. Simpler and just as correct as trying to
+    // force an immediate redraw the moment the background thread
+    // finishes, which would mean touching X11 from that thread.
+    StartIndexRebuild();
     UpdateMatches();
-}
-
-void Launcher::BuildFileIndex()
-{
-    namespace fs = std::filesystem;
-
-    m_files.clear();
-
-    // Loaded once and reused for every File match in Redraw() - these
-    // are generic type icons (not per-file), so there's no point
-    // re-resolving them from the icon theme for every entry.
-    if (!m_folderIconPixmap)
-    {
-        m_folderIconPixmap =
-            LoadIcon(FindIconPath("folder"), m_folderIconMask);
-    }
-
-    if (!m_fileIconPixmap)
-    {
-        m_fileIconPixmap =
-            LoadIcon(FindIconPath("text-x-generic"), m_fileIconMask);
-    }
-
-    const char* home = std::getenv("HOME");
-
-    if (!home)
-        return;
-
-    try
-    {
-        for (const auto& entry :
-             fs::recursive_directory_iterator(home))
-        {
-            if (!entry.is_regular_file() &&
-                !entry.is_directory())
-                continue;
-
-            FileEntry file;
-
-            file.path =
-                entry.path().string();
-
-            file.name =
-                entry.path().filename().string();
-
-            file.isDirectory =
-                entry.is_directory();
-
-            m_files.push_back(
-                std::move(file));
-        }
-    }
-    catch (...)
-    {
-    }
-
-    std::printf(
-        "Indexed %zu files\n",
-        m_files.size());
 }
 
 }
