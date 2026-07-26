@@ -76,6 +76,15 @@ public:
     void HandleDestroyNotify(const XDestroyWindowEvent& event);
     void HandleEnterNotify(const XCrossingEvent& event);
     void HandlePropertyNotify(const XPropertyEvent& event);
+
+    // Second line of defence against focus-stealing while the
+    // Launcher/Notepad is open (the first is Manage() not calling
+    // Focus() on a newly-mapped window in the first place) - catches
+    // any window, however it got there, ending up with real X input
+    // focus while a modal should have it instead, and immediately
+    // hands focus back. See EventDispatcher's FocusIn case for why
+    // this always fires.
+    void HandleFocusIn(const XFocusChangeEvent& event);
     void HandleButtonPressOnClient(const XButtonEvent& event);
     void HandleExpose(const XExposeEvent& event);
     void HandleClientMessage(const XClientMessageEvent& event);

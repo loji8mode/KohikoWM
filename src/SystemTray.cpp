@@ -46,8 +46,23 @@ void SystemTray::Initialize(
     m_xembedAtom      = XInternAtom(display, "_XEMBED", False);
     m_xembedInfoAtom  = XInternAtom(display, "_XEMBED_INFO", False);
 
+    // Launcher.cpp gets per-pixel icon transparency by asking Imlib2
+    // for a 1-bit shape mask and clipping XCopyArea with it - that
+    // works there because Launcher draws every icon pixmap itself.
+    // Tray icons are the opposite: they're real top-level windows
+    // belonging to other processes, reparented in via XEmbed, so
+    // there's no pixmap of ours to mask. The equivalent trick for a
+    // reparented window is ParentRelative: instead of owning a solid
+    // fill (this used to be BlackPixel, which is why every tray icon
+    // sat on a visible black square that didn't match the Bar's actual
+    // - configurable, non-black - background colour), the container
+    // asks X to paint whatever its parent (the Bar window) would have
+    // painted there. Because that's a live reference to the parent's
+    // background attribute rather than a snapshot, it keeps tracking
+    // the Bar's background automatically even across a config reload
+    // that changes bar.background.
     XSetWindowAttributes attrs{};
-    attrs.background_pixel = BlackPixel(display, screen);
+    attrs.background_pixmap = ParentRelative;
     attrs.event_mask = 0; // icons paint themselves - we don't need Expose here
 
     m_container = XCreateWindow(
@@ -59,7 +74,7 @@ void SystemTray::Initialize(
         DefaultDepth(display, screen),
         InputOutput,
         DefaultVisual(display, screen),
-        CWBackPixel | CWEventMask,
+        CWBackPixmap | CWEventMask,
         &attrs);
 
     XMapWindow(display, m_container);
@@ -214,6 +229,18 @@ void SystemTray::DockIcon(
     // event dispatch - the same path every other window's events
     // already go through.
     XSelectInput(display, icon, StructureNotifyMask | PropertyChangeMask);
+
+    // Best-effort only: an icon app that paints its own opaque surface
+    // (most toolkits do) will just draw straight over this, and that's
+    // fine - this only helps the simpler icons that leave X to fill in
+    // whatever they don't explicitly paint, so those show the tray's
+    // real background instead of a black/white square around the
+    // glyph. A misbehaving client refusing this is a normal, harmless
+    // async X error (caught by XConnection's global error handler),
+    // not something that can take the rest of DockIcon() down with it.
+    XSetWindowAttributes iconAttrs{};
+    iconAttrs.background_pixmap = ParentRelative;
+    XChangeWindowAttributes(display, icon, CWBackPixmap, &iconAttrs);
 
     XReparentWindow(display, icon, m_container, 0, 0);
 

@@ -124,7 +124,7 @@ int main()
     Check(static_cast<BSPLeaf*>(leftSplit->Right())->Window() == A,
           "left split's second child is now A");
 
-    std::printf("\n-- Resize (Super+RMB): grows the grabbed window in the drag direction --\n");
+    std::printf("\n-- Resize (Super+RMB): the divider always tracks the mouse, not the grabbed window --\n");
 
     // The split holding D/A could have ended up Vertical or Horizontal
     // depending on the anchor's aspect ratio at insert time (that's
@@ -134,14 +134,22 @@ int main()
     int dx = leftIsVertical ? 100 : 0;
     int dy = leftIsVertical ? 0   : 100;
 
+    // Same drag (same dx/dy, same sign) regardless of which of the two
+    // windows is under the cursor: the divider between them - and
+    // therefore the ratio, which is the FIRST child's share - must
+    // move the same way both times. That's the actual regression this
+    // test guards: an earlier version flipped the sign whenever
+    // `window` was the second child, which moved the divider backwards
+    // relative to the mouse and read as inverted dragging for whatever
+    // window happened to be on that side of the split.
     float ratio0 = leftSplit->Ratio();
-    tree.Resize(D, dx, dy); // D is the FIRST child here -> should grow D -> ratio increases
+    tree.Resize(D, dx, dy); // D is the FIRST child here
     float ratio1 = leftSplit->Ratio();
-    Check(ratio1 > ratio0, "dragging the FIRST child in the growth direction increases its ratio");
+    Check(ratio1 > ratio0, "dragging in the positive direction increases the first child's ratio (grabbed the FIRST child)");
 
-    tree.Resize(A, dx, dy); // A is the SECOND child -> should grow A -> ratio decreases
+    tree.Resize(A, dx, dy); // A is the SECOND child - same dx/dy as above
     float ratio2 = leftSplit->Ratio();
-    Check(ratio2 < ratio1, "dragging the SECOND child in the growth direction decreases the first child's ratio");
+    Check(ratio2 > ratio1, "the same drag increases the first child's ratio again, even though this time the SECOND child was grabbed");
 
     std::printf("\n-- Rotate / Flip --\n");
 

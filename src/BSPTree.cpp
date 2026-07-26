@@ -222,14 +222,27 @@ void BSPTree::Resize(ManagedWindow* window, int dx, int dy)
             delta = static_cast<float>(dy) / static_cast<float>(area.height);
     }
 
-    // Ratio is the *first* child's share. Dragging should grow
-    // whichever window you actually grabbed in the direction you drag
-    // it - so if `window` is the second child, a positive delta (drag
-    // right/down) must shrink the first child's share instead of
-    // growing it, i.e. the sign flips.
-    if (parent->Right() == leaf)
-        delta = -delta;
-
+    // Ratio is the *first* child's share, and the divider between the
+    // two children sits at a screen coordinate of area.(x|y) +
+    // first-child-size - so adding delta straight to it moves that
+    // divider in the same screen direction you're actually dragging
+    // the mouse (right/down = the divider's own coordinate increases),
+    // for both children, not just the first one.
+    //
+    // An earlier version flipped delta's sign whenever `window` was
+    // the *second* child, on the theory that "the grabbed window
+    // should always grow toward wherever you drag it". In practice
+    // that makes the divider itself walk backwards relative to the
+    // mouse whenever you grab the right/bottom window: e.g. dragging
+    // right with the cursor over a window docked on the right half of
+    // the screen would shrink it - its divider sliding left while the
+    // cursor moves right - which reads as the window moving inverted
+    // to the mouse. Applying delta unconditionally keeps the divider
+    // tracking the mouse 1:1 regardless of which side of it you
+    // grabbed, matching ordinary drag-to-resize behaviour; which
+    // window grows vs. shrinks is then just a consequence of which
+    // side of the divider it's on, exactly like dragging a border
+    // anywhere else.
     parent->SetRatio(parent->Ratio() + delta);
 }
 

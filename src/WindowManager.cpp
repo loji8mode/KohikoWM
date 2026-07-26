@@ -223,6 +223,29 @@ void WindowManager::HandleEnterNotify(const XCrossingEvent& event)
         Focus(event.window);
 }
 
+void WindowManager::HandleFocusIn(const XFocusChangeEvent& event)
+{
+    if (!m_launcher.IsOpen() && !m_notepad.IsOpen())
+        return;
+
+    ::Window modalWindow =
+        m_launcher.IsOpen() ? m_launcher.WindowId() : m_notepad.WindowId();
+
+    if (event.window == modalWindow)
+        return;
+
+    // Some apps (a handful of Electron/GTK ones, mostly) call
+    // XSetInputFocus on their own window right after mapping, entirely
+    // independent of whatever the window manager just did - there's
+    // nothing in the X protocol that stops a client from doing this.
+    // Without this, the Launcher/Notepad - which never uses an active
+    // keyboard grab, see Launcher's class comment - would silently
+    // stop receiving keystrokes the moment that happens, with no
+    // visible sign anything had changed and no way to even close it
+    // from the keyboard. Just take focus straight back.
+    m_connection.SetInputFocus(modalWindow);
+}
+
 void WindowManager::HandlePropertyNotify(const XPropertyEvent& event)
 {
     if (event.atom != m_atoms.NET_WM_NAME && event.atom != XA_WM_NAME)
@@ -646,7 +669,33 @@ void WindowManager::Manage(WindowID id)
     {
         m_connection.MapWindow(id);
         Arrange();
-        Focus(id);
+
+        // A window opened while the Launcher/Notepad is up should
+        // still tile in and become visible - just not take keyboard
+        // focus away from it. The Launcher deliberately never uses an
+        // XGrabKeyboard (see its class comment), so it depends
+        // entirely on actually holding X input focus to receive
+        // Enter/Escape/typing at all; losing focus here used to leave
+        // it visibly open but completely unreachable from the
+        // keyboard, with no way to even close it. Re-asserting focus
+        // on the modal (rather than just skipping the Focus(id) call)
+        // also covers apps that request focus for themselves as part
+        // of mapping - HandleFocusIn() below is the second line of
+        // defence for ones that grab it a moment later instead.
+        if (m_launcher.IsOpen())
+        {
+            m_connection.SetInputFocus(m_launcher.WindowId());
+            RefreshBorderColor(window);
+        }
+        else if (m_notepad.IsOpen())
+        {
+            m_connection.SetInputFocus(m_notepad.WindowId());
+            RefreshBorderColor(window);
+        }
+        else
+        {
+            Focus(id);
+        }
     }
     else
     {

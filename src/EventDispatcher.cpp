@@ -47,6 +47,20 @@ void EventDispatcher::Dispatch(
             m_windowManager.HandlePropertyNotify(event.xproperty);
             break;
 
+        // Every managed window has FocusChangeMask selected (see
+        // WindowManager::Manage()), so this fires no matter *how* a
+        // window ends up focused - through our own SetInputFocus calls
+        // as much as through a client calling XSetInputFocus on itself
+        // directly, which nothing in the X protocol stops a client
+        // from doing regardless of what the window manager wants. This
+        // is what lets WindowManager notice and immediately hand focus
+        // back to the Launcher/Notepad when that happens (see
+        // WindowManager::HandleFocusIn()) instead of the modal quietly
+        // going deaf to the keyboard.
+        case FocusIn:
+            m_windowManager.HandleFocusIn(event.xfocus);
+            break;
+
         case Expose:
             m_windowManager.HandleExpose(event.xexpose);
             break;

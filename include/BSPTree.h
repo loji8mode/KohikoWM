@@ -62,10 +62,13 @@ public:
     void Swap(ManagedWindow* first, ManagedWindow* second);
 
     // Super+RMB drag target: nudges the ratio of `window`'s immediate
-    // parent Split so that `window` itself grows/shrinks in the
-    // direction you drag (dx for a left/right split, dy for a
-    // top/bottom one) - regardless of whether it's the first or
-    // second child. Everything else in that subtree adjusts
+    // parent Split so the divider between its two children tracks the
+    // mouse 1:1 on screen (dx for a left/right split, dy for a
+    // top/bottom one) - dragging right/down always moves the divider
+    // right/down, regardless of whether `window` is the first or
+    // second child, so whichever of the two windows you actually
+    // grabbed grows or shrinks exactly like dragging a normal resize
+    // border would. Everything else in that subtree adjusts
     // automatically next time LayoutEngine runs.
     void Resize(ManagedWindow* window, int dx, int dy);
 

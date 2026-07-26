@@ -1,15 +1,13 @@
 # Changelog
 
-## Version 0.5.0
+## Version 0.5.1
 
-Release date: 2026-07-12
+Release date: 2026-07-13
 
-### Added
-- EWMH/NetWM compliance: Kohiko now creates an invisible check window and publishes `_NET_SUPPORTING_WM_CHECK` and `_NET_SUPPORTED`, and keeps `_NET_CLIENT_LIST` (every managed window) and `_NET_ACTIVE_WINDOW` (the focused window) current for the session. This lets EWMH-aware tools that check for a compliant window manager before trusting window discovery (flameshot's screenshot overlay is the motivating example) work correctly under Kohiko.
-- `Command::LauncherReload` and `Super+Shift+D` binding, plus `kohikoctl reloadlauncher`: rebuilds the launcher's cached application list and file index from disk immediately, without restarting Kohiko.
-
-### Changed
-- The launcher's application list and file index are now explicitly documented/exposed as an in-memory cache that does not automatically pick up newly installed applications or new/removed files until refreshed.
+### Fixed
+- `Super+RMB` resize on a tiled window: fixed a sign error where dragging the *second* child of a split resized it opposite to the direction it was dragged (grabbing the right/bottom window and dragging right/down could shrink it). The divider between the two children now consistently tracks the mouse direction regardless of which child was grabbed.
+- Focus-stealing while the Launcher or Notepad is open: added a `FocusIn` event handler (`WindowManager::HandleFocusIn`) that immediately hands X input focus back to the open modal if any window (including one that calls `XSetInputFocus` on itself directly, as some Electron/GTK applications do) ends up focused while a modal should hold it. This is a second line of defense alongside not calling `Focus()` on newly-mapped windows while a modal is open.
+- System tray icon background: tray icons previously sat on a hardcoded black background rectangle that didn't match the bar's configured (non-black) background color; the tray container and docked icons now use `ParentRelative` background painting, which tracks the bar's actual background color, including across a config reload.
 
 ### Notes
-- The application list and file index were already cached in memory as of 0.4.0; this release adds the explicit, on-demand refresh mechanism (`Super+Shift+D` / `kohikoctl reloadlauncher`) for that cache.
+- The resize-direction fix is covered by an updated regression test in `tests/test_bsptree.cpp`.
