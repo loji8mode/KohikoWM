@@ -165,6 +165,38 @@ int main()
     ManagedWindow* hit = tree.HitTest(Point{C->Geometry().CenterX(), C->Geometry().CenterY()});
     Check(hit == C, "HitTest() at C's own center finds C");
 
+    std::printf("\n-- HasSpaceForAnotherWindow (bug #4: minimum tile size) --\n");
+
+    Check(BSPTree().HasSpaceForAnotherWindow(area, 4, 100, 60),
+          "a brand-new empty tree always has room for the first window");
+
+    Check(tree.HasSpaceForAnotherWindow(area, params.innerGap, 50, 50),
+          "the existing 4-window 1920x1080 tree still has room for a modest 50x50 minimum");
+    Check(!tree.HasSpaceForAnotherWindow(area, params.innerGap, 2000, 2000),
+          "the existing 4-window tree has no room left for an unreasonably large minimum");
+
+    // Precise boundary check on a tree that has *never* been laid out
+    // (Arrange() only lays out the current workspace, so a tree living
+    // on some other workspace can easily be in exactly this state) -
+    // HasSpaceForAnotherWindow() must still get the right answer by
+    // recomputing from `tilingArea` itself rather than trusting any
+    // node's (here, nonexistent) cached Geometry().
+    //
+    // A 220x100 area is wider than it is tall, so DirectionForRect()
+    // picks a Vertical (left/right) split: with a 4px gap that divides
+    // into two 108px-wide children (Insert() always uses a fresh 50/50
+    // ratio), so a 100px minimum should just clear and a 110px minimum
+    // should not.
+    ManagedWindow* E = makeWindow(5);
+    BSPTree soloTree;
+    soloTree.Insert(E);
+
+    Rect soloArea{0, 0, 220, 100};
+    Check(soloTree.HasSpaceForAnotherWindow(soloArea, 4, 100, 60),
+          "never-laid-out tree: 108px-wide half still clears a 100px minimum width");
+    Check(!soloTree.HasSpaceForAnotherWindow(soloArea, 4, 110, 60),
+          "never-laid-out tree: 108px-wide half no longer clears a 110px minimum width");
+
     std::printf("\n-- Remove (no empty nodes left behind) --\n");
 
     tree.Remove(B);

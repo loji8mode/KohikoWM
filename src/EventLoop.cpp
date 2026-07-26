@@ -40,6 +40,33 @@ void EventLoop::Run()
         {
             XEvent event;
             XNextEvent(display, &event);
+
+            // Motion-event compression: a slow-to-process WM (or a
+            // fast mouse) can leave several MotionNotify events queued
+            // up behind each other. Working through them one at a time
+            // means Super+RMB resize and the Super+LMB drag-follow
+            // always lag a little behind the *actual* pointer, which
+            // reads as jerky. Instead, whenever the next queued event
+            // is another MotionNotify for the same window, skip
+            // straight to it and keep only the newest point - the
+            // motion handlers below always compute their delta from
+            // absolute coordinates, so collapsing a run of motion
+            // events down to the last one loses no information.
+            if (event.type == MotionNotify)
+            {
+                while (XPending(display) > 0)
+                {
+                    XEvent next;
+                    XPeekEvent(display, &next);
+
+                    if (next.type != MotionNotify ||
+                        next.xmotion.window != event.xmotion.window)
+                        break;
+
+                    XNextEvent(display, &event);
+                }
+            }
+
             m_windowManager.Dispatcher().Dispatch(event);
 
             if (!m_windowManager.IsRunning())
@@ -65,9 +92,22 @@ void EventLoop::Run()
                 maxFd = ipcFd;
         }
 
+        // A window sliding into place after a Swap needs Tick() to run
+        // at something like frame rate, not once a second - but only
+        // while an animation is actually in flight, so an idle Kohiko
+        // still spends almost all its time asleep in select().
         timeval timeout{};
-        timeout.tv_sec = 1;
-        timeout.tv_usec = 0;
+
+        if (m_windowManager.HasActiveAnimation())
+        {
+            timeout.tv_sec = 0;
+            timeout.tv_usec = 8000; // ~125Hz
+        }
+        else
+        {
+            timeout.tv_sec = 1;
+            timeout.tv_usec = 0;
+        }
 
         int ready = select(maxFd + 1, &readSet, nullptr, nullptr, &timeout);
 

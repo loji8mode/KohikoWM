@@ -146,6 +146,12 @@ void Bar::SetScratchpadActive(
     m_scratchpadActive = active;
 }
 
+void Bar::SetNotepadActive(
+    bool active)
+{
+    m_notepadActive = active;
+}
+
 int Bar::Height() const
 {
     return m_height;
@@ -175,6 +181,12 @@ void Bar::Redraw()
     if (m_scratchpadActive)
     {
         DrawText(x, baseline, "[S]", m_activePixel);
+        x += 34;
+    }
+
+    if (m_notepadActive)
+    {
+        DrawText(x, baseline, "[N]", m_activePixel);
         x += 34;
     }
 

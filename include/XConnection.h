@@ -37,6 +37,13 @@ public:
 
     int Screen() const;
 
+    // The actual display string this connection resolved to (e.g.
+    // ":1"), regardless of whether Connect() was given an explicit
+    // name or fell back to $DISPLAY. Used to pin every process Kohiko
+    // spawns to *this* X11 session instead of whatever DISPLAY value
+    // (or none) happens to be sitting in the environment.
+    std::string DisplayName() const;
+
     int ConnectionFd() const;
 
     void Flush();
@@ -58,6 +65,11 @@ public:
     void CloseWindow(::Window window, const XAtoms& atoms);
 
     void MoveResizeWindow(::Window window, const Rect& rect);
+
+    // Pure reposition, no resize - used while a Swap drag is following
+    // the cursor, where the window's size must stay exactly as picked
+    // up until it lands on its new tile.
+    void MoveWindowTo(::Window window, int x, int y);
 
     void SetBorderWidth(::Window window, int width);
 

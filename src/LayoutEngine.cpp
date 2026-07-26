@@ -62,29 +62,9 @@ void LayoutEngine::Calculate(
 
     auto* split = static_cast<BSPSplit*>(node);
 
-    Rect first  = area;
-    Rect second = area;
-
-    if (split->Direction() == SplitDirection::Vertical)
-    {
-        int usable      = std::max(0, area.width - innerGap);
-        int firstWidth  = static_cast<int>(static_cast<float>(usable) * split->Ratio());
-        int secondWidth = usable - firstWidth;
-
-        first.width   = firstWidth;
-        second.x      = area.x + firstWidth + innerGap;
-        second.width  = secondWidth;
-    }
-    else
-    {
-        int usable       = std::max(0, area.height - innerGap);
-        int firstHeight  = static_cast<int>(static_cast<float>(usable) * split->Ratio());
-        int secondHeight = usable - firstHeight;
-
-        first.height  = firstHeight;
-        second.y      = area.y + firstHeight + innerGap;
-        second.height = secondHeight;
-    }
+    Rect first;
+    Rect second;
+    split->Subdivide(area, innerGap, first, second);
 
     Calculate(split->Left(),  first,  innerGap, borderWidth);
     Calculate(split->Right(), second, innerGap, borderWidth);

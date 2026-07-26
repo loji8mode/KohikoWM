@@ -88,4 +88,35 @@ void BSPSplit::SwapChildren()
     std::swap(m_left, m_right);
 }
 
+void BSPSplit::Subdivide(
+    const Rect& area,
+    int innerGap,
+    Rect& first,
+    Rect& second) const
+{
+    first  = area;
+    second = area;
+
+    if (m_direction == SplitDirection::Vertical)
+    {
+        int usable      = std::max(0, area.width - innerGap);
+        int firstWidth  = static_cast<int>(static_cast<float>(usable) * m_ratio);
+        int secondWidth = usable - firstWidth;
+
+        first.width  = firstWidth;
+        second.x     = area.x + firstWidth + innerGap;
+        second.width = secondWidth;
+    }
+    else
+    {
+        int usable       = std::max(0, area.height - innerGap);
+        int firstHeight  = static_cast<int>(static_cast<float>(usable) * m_ratio);
+        int secondHeight = usable - firstHeight;
+
+        first.height  = firstHeight;
+        second.y      = area.y + firstHeight + innerGap;
+        second.height = secondHeight;
+    }
+}
+
 }

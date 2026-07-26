@@ -62,19 +62,28 @@ void MouseManager::HandlePress(
 
     if (Matches(m_swapBinding, event.state, event.button))
     {
-        m_mode = DragMode::Swap;
         m_dragWindow = m_windowManager.WindowAt(point);
         m_lastX = event.x_root;
         m_lastY = event.y_root;
+
+        if (!m_dragWindow)
+            return; // nothing under the cursor to pick up
+
+        m_mode = DragMode::Swap;
+        m_windowManager.BeginSwapDrag(m_dragWindow, point);
         return;
     }
 
     if (Matches(m_resizeBinding, event.state, event.button))
     {
-        m_mode = DragMode::Resize;
         m_dragWindow = m_windowManager.WindowAt(point);
         m_lastX = event.x_root;
         m_lastY = event.y_root;
+
+        if (!m_dragWindow)
+            return;
+
+        m_mode = DragMode::Resize;
         m_windowManager.SetResizingCursor(true);
         return;
     }
@@ -90,14 +99,11 @@ void MouseManager::HandleMotion(
 
     if (m_mode == DragMode::Swap)
     {
-        ManagedWindow* hovered = m_windowManager.WindowAt(point);
-
-        // The dragged window's *identity* never changes across a
-        // swap - only which leaf it lives in does - so we always keep
-        // comparing against the same m_dragWindow pointer and simply
-        // swap again every time the cursor crosses into a new leaf.
-        if (hovered && hovered != m_dragWindow)
-            m_windowManager.SwapWindows(m_dragWindow, hovered);
+        // The picked-up window just follows the cursor 1:1 here -
+        // nothing else moves, and no swap happens, until the button
+        // is released. "Where it lands" is decided once, at drop
+        // time, in WindowManager::EndSwapDrag().
+        m_windowManager.UpdateSwapDrag(m_dragWindow, point);
     }
     else if (m_mode == DragMode::Resize)
     {
@@ -112,10 +118,17 @@ void MouseManager::HandleMotion(
 }
 
 void MouseManager::HandleRelease(
-    const XButtonEvent&)
+    const XButtonEvent& event)
 {
-    if (m_mode == DragMode::Resize)
+    if (m_mode == DragMode::Swap && m_dragWindow)
+    {
+        Point point{event.x_root, event.y_root};
+        m_windowManager.EndSwapDrag(m_dragWindow, point);
+    }
+    else if (m_mode == DragMode::Resize)
+    {
         m_windowManager.SetResizingCursor(false);
+    }
 
     m_mode = DragMode::Idle;
     m_dragWindow = nullptr;

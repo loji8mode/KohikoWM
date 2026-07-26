@@ -88,6 +88,18 @@ int XConnection::Screen() const
     return m_screen;
 }
 
+std::string XConnection::DisplayName() const
+{
+    if (!m_display)
+        return std::string();
+
+    // XDisplayString() reports the name actually in effect (Connect()
+    // passes nullptr to XOpenDisplay(), which resolves via $DISPLAY
+    // itself) - reading it back here rather than re-reading getenv()
+    // guarantees we report exactly the session this connection is on.
+    return XDisplayString(m_display);
+}
+
 int XConnection::ConnectionFd() const
 {
     return ConnectionNumber(m_display);
@@ -167,6 +179,11 @@ void XConnection::MoveResizeWindow(::Window window, const Rect& rect)
         static_cast<unsigned int>(rect.width > 0 ? rect.width : 1),
         static_cast<unsigned int>(rect.height > 0 ? rect.height : 1)
     );
+}
+
+void XConnection::MoveWindowTo(::Window window, int x, int y)
+{
+    XMoveWindow(m_display, window, x, y);
 }
 
 void XConnection::SetBorderWidth(::Window window, int width)

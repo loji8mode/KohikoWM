@@ -52,7 +52,16 @@ void EventDispatcher::Dispatch(
             break;
 
         case KeyPress:
-            m_keyboard.HandleKeyPress(event.xkey);
+
+            // The Launcher/Notepad get first refusal on every key
+            // while either is open (see WindowManager::Manage()'s
+            // Super+Q hardening notes for why this is a plain
+            // conditional here and never an XGrabKeyboard) - only
+            // fall through to ordinary hotkey matching once neither
+            // is open.
+            if (!m_windowManager.HandleModalKeyPress(event.xkey))
+                m_keyboard.HandleKeyPress(event.xkey);
+
             break;
 
         case ButtonPress:

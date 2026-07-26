@@ -2,9 +2,11 @@
 
 A small, fast tiling window manager for X11, built around a Hyprland-style
 BSP (binary space partitioning) layout: every new window splits the space
-next to whatever's focused, `Super+LMB` drags swap two windows outright,
-and `Super+RMB` drags resize a window and everything next to it adjusts
-automatically.
+next to whatever's focused, `Super+LMB` drags pick a window up and swap it
+with wherever you drop it, and `Super+RMB` drags resize a window and
+everything next to it adjusts automatically. A native launcher (`Super+D`)
+and a small scratch notepad (`Super+N`) round it out - both drawn the same
+plain-Xlib way as the bar, with no extra process or toolkit dependency.
 
 Kohiko is **not** a Hyprland replacement and it isn't Wayland - Hyprland is
 a Wayland compositor, which means competing with it feature-for-feature
@@ -13,9 +15,12 @@ scratch. Kohiko instead borrows the parts of Hyprland's tiling *behaviour*
 that make it pleasant to use (the BSP dwindle-style layout, `hyprctl`-style
 IPC, sane defaults) and implements them as a plain X11 window manager, on
 top of decades-old, extremely well understood APIs. The payoff: no
-compositing, no GPU shaders, no animations, nothing running that doesn't
-have to - just gaps, borders, and tiling. It should run comfortably on
-hardware that would struggle with a full compositor.
+compositing, no GPU shaders, no decorative effects, nothing running that
+doesn't have to - just gaps, borders, and tiling, plus the one animation
+rule the project does follow: motion only ever plays to confirm an action
+you just took (a swapped window sliding into its new tile), never as
+decoration. It should run comfortably on hardware that would struggle with
+a full compositor.
 
 ## Contents
 
@@ -24,6 +29,8 @@ hardware that would struggle with a full compositor.
 - [Configuration](#configuration)
 - [Default keybindings](#default-keybindings)
 - [The mouse: swap and resize](#the-mouse-swap-and-resize)
+- [The launcher (Super+D)](#the-launcher-superd)
+- [The notepad (Super+N)](#the-notepad-supern)
 - [kohikoctl / IPC](#kohikoctl--ipc)
 - [Architecture](#architecture)
 - [Known limitations](#known-limitations)
@@ -105,12 +112,16 @@ general.border_color_active=0x89b4fa
 general.border_color_inactive=0x45475a
 general.smart_gaps=true          # gaps collapse to 0 with only one tiled window
 general.smart_borders=true       # same, for the border
+general.min_tile_width=100       # a new tile is never allowed to shrink below this...
+general.min_tile_height=60       # ...falls back to another workspace, then floating
 general.bar_height=26
 general.focus_follows_mouse=true
 
 workspace.count=10
 scratchpad.width=70%
 scratchpad.height=70%
+notepad.width=40%
+notepad.height=50%
 
 exec.terminal=xterm              # referenced from `bind=... exec terminal`
 
@@ -129,7 +140,8 @@ Reload after editing without restarting: `kohikoctl reload` (also bound to
 | Bind                  | Action                                   |
 |-----------------------|-------------------------------------------|
 | `Super+Return`         | launch `exec.terminal`                    |
-| `Super+D`              | launch `exec.launcher`                    |
+| `Super+D`              | toggle the native launcher                |
+| `Super+N`              | toggle the native notepad                 |
 | `Super+Q`              | close the focused window                  |
 | `Super+Space`          | toggle floating                           |
 | `Super+F`              | toggle fullscreen                         |
@@ -150,21 +162,67 @@ to them freely; nothing is hardcoded.
 These are the two gestures the whole layout is built around:
 
 - **`Super` + left-click and drag** picks up whatever window is under the
-  cursor and swaps it with whatever window you drag onto. Geometry never
-  changes; only which window occupies which tile does, so it survives the
-  very next layout pass without any teleporting or animation - it just
-  looks like the two windows traded places. Drag across several windows in
-  one gesture and each crossing swaps again, so you can shuffle a window
-  several tiles over in one motion.
+  cursor: it detaches and follows the cursor exactly, and nothing else on
+  screen moves while you're dragging - this is deliberately not a live
+  swap-on-hover, so the only thing that happens *is* the thing you're
+  doing. Whichever tiled window you're currently over gets a highlighted
+  border as a preview of what you're about to swap with. Release over a
+  window and the two trade places, each sliding smoothly into its new
+  tile; release over empty space (or back over the window you picked up)
+  and it slides back home instead. Geometry itself never changes - only
+  which window occupies which tile does - the sliding motion is just
+  confirming that for you, not decoration.
 - **`Super` + right-click and drag** resizes: the window you grabbed grows
   or shrinks in whichever direction you drag it, and its neighbour shrinks
-  or grows to match, exactly like dragging the divider between them.
+  or grows to match, exactly like dragging the divider between them -
+  updated on every reported mouse movement with no queued-up lag, even
+  under a fast/laggy pointer (Kohiko collapses a backlog of motion events
+  down to the latest one rather than working through it one at a time).
 
 Both are rebindable via `mouse.swap=` / `mouse.resize=` (e.g. `SUPER+BTN2`
 for the middle button). Floating windows are intentionally not part of
 either gesture - dragging a floating window around isn't something this
 layout is trying to do (per the original design note: no floating-window
 move like i3, specifically Hyprland-style BSP dragging only).
+
+## The launcher (Super+D)
+
+`Super+D` opens a small centered input box - about a twelfth of the
+screen's area, wide rather than square, so it reads as "a line to type
+into" rather than a dialog. It opens with the cursor already in the field;
+type a command, press `Enter`, and it runs (via the same `/bin/sh -c`
+mechanism as `exec.*=` entries) and the box closes itself. `Escape` cancels
+without running anything, and clicking anywhere outside the box also
+dismisses it.
+
+This replaced the earlier default of shelling out to `dmenu_run` - it's
+Kohiko's own window, drawn the same plain-Xlib way as the bar, with no
+external launcher binary required. If you'd rather use dmenu, rofi, or
+similar instead, the general `exec.<name>=` + `bind=... exec <name>`
+mechanism is still there for it; see the commented-out example in
+`config/default.conf`.
+
+## The notepad (Super+N)
+
+`Super+N` toggles a small native scratch-notes box: free-form multi-line
+text (typing, `Enter` for a new line, `Backspace`/`Delete`, arrow keys,
+`Home`/`End`), saved automatically to `~/.config/kohiko/notepad.txt` and
+restored from there on every restart. `Escape` hides it again (saving on
+the way out) without closing or discarding anything.
+
+The bar shows a `[N]` indicator whenever the notepad has any saved content
+or is currently open - a bracketed-letter indicator in the same style as
+the scratchpad's `[S]`, rather than an actual icon glyph, since Kohiko's
+bar only ever draws with a plain X11 core font and those don't carry emoji
+glyphs to draw with.
+
+Deliberately, this is *not* "spawn a text editor into a hidden special
+workspace and toggle it," which is the common pattern in the Hyprland
+ecosystem for this kind of quick-notes utility - it's a genuinely native
+widget with its own tiny text buffer, again with no toolkit or external
+process involved. The trade-off is a correspondingly small feature set: no
+undo, no selection, no copy/paste - it's meant for jotting something down,
+not replacing a real editor.
 
 ## kohikoctl / IPC
 
@@ -193,11 +251,14 @@ Roughly the file layout the project was designed around, one responsibility each
 
 | File                       | Responsibility |
 |----------------------------|----------------|
-| `BSPTree` / `BSPNode` / `BSPLeaf` / `BSPSplit` | The tree itself: insert-next-to-focused, remove-and-collapse, swap, resize, rotate, flip, neighbor search, hit-testing, JSON dump |
+| `BSPTree` / `BSPNode` / `BSPLeaf` / `BSPSplit` | The tree itself: insert-next-to-focused (with a minimum-tile-size guard), remove-and-collapse, swap, resize, rotate, flip, neighbor search, hit-testing, JSON dump |
 | `LayoutEngine`             | Walks the tree and turns ratios into pixels (gaps, borders, smart gaps/borders) |
 | `WindowManager`            | Coordinator - owns everything else, sequences the actual X11 event handling |
 | `KeyboardManager`          | Config binds -> grabbed keys -> `Command`s. No other logic. |
 | `MouseManager`             | The Super+drag state machine described above |
+| `Animator`                 | The small rect-tween stepper behind the Swap-drop animation |
+| `Launcher`                 | The native `Super+D` input box |
+| `Notepad`                  | The native `Super+N` scratch-notes box, with disk persistence |
 | `EventDispatcher`          | One `switch` over every X11 event type |
 | `XConnection`              | The only file that calls Xlib directly (almost) |
 | `WorkspaceManager` / `Workspace` | Which workspace is current/previous |
@@ -205,15 +266,22 @@ Roughly the file layout the project was designed around, one responsibility each
 | `ManagedWindow`            | Everything Kohiko knows about one window |
 | `Config` / `ConfigParser`  | The `key=value` file, with repeatable keys for `bind=`/`exec.*=` |
 | `IPCServer` / `kohikoctl`  | The Unix-socket control protocol and its CLI client |
-| `Bar`                      | Workspaces, active title, scratchpad indicator, clock - plain Xlib text, no toolkit |
+| `Bar`                      | Workspaces, active title, scratchpad/notepad indicators, clock - plain Xlib text, no toolkit |
 | `MonitorManager` / `Monitor` | XRandr geometry when available, one-monitor fallback otherwise |
 
 A `BSPNode`'s `Geometry()` is its raw tree-partition rect (no gaps - used
 for hit-testing and neighbor search because it tiles the workspace with no
 dead zones); a `ManagedWindow`'s `Geometry()` is the actual on-screen rect
 after gaps and border are subtracted. Swapping re-points which window a
-leaf refers to rather than touching any rect, which is what makes it
-survive being laid out again immediately afterward.
+leaf refers to rather than touching any rect, which is what makes it safe
+to lay out again immediately afterward - `Animator` then plays that
+transition back over a couple of frames instead of applying it instantly,
+which is the only place Kohiko's "no decorative animation" rule allows
+motion at all. Before a window is ever inserted, `BSPTree::HasSpaceForAnotherWindow()`
+answers "would this shrink something below `general.min_tile_*`?" without
+mutating anything, which is what lets `WindowManager` fall back to another
+workspace (or, failing that, floating) instead of ever tiling a window
+into an unusably small space.
 
 ## Known limitations
 
@@ -228,3 +296,11 @@ survive being laid out again immediately afterward.
 - Moving a **floating** window around isn't bound to anything by design
   (see above); it spawns centered and stays wherever the client puts it or
   wherever you leave it via its own controls.
+- **The notepad is intentionally minimal** - no undo, no text selection,
+  no copy/paste. It's a quick-notes box, not a text editor.
+- **Kohiko doesn't adopt windows that were already mapped by a previous
+  window manager** - it only manages windows that map *after* it starts
+  (the usual `MapRequest`-driven flow every X11 WM relies on). Restarting
+  Kohiko itself while other windows are already open will leave those
+  specific windows unmanaged until they're reopened; this isn't new
+  behaviour, just worth knowing about.

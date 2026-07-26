@@ -16,10 +16,13 @@ class ManagedWindow;
 
 // The interesting logic the spec calls out for this file: tracks a
 // Super+drag from press through motion to release and turns it into
-// either a live swap-on-hover (LMB) or a live ratio resize (RMB).
+// either a pick-up-and-drop swap (LMB) or a live ratio resize (RMB).
 //
-//   LMB: press -> hit-test a leaf -> cursor moves -> hit-test again
-//        -> different leaf found -> Swap() -> repeat
+//   LMB: press -> hit-test a leaf -> WindowManager detaches it and
+//        follows the cursor with it on every motion event (nothing
+//        else moves) -> release -> WindowManager hit-tests the drop
+//        point and either swaps the two windows or snaps back, both
+//        cases animated into place
 //   RMB: press -> hit-test a leaf -> cursor moves -> feed the pixel
 //        delta straight into Resize() every motion event -> repeat
 //

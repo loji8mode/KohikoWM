@@ -4,6 +4,7 @@
 #include "Config.h"
 #include "IpcPath.h"
 #include "Json.h"
+#include "Logger.h"
 #include "ManagedWindow.h"
 #include "Process.h"
 #include "Utils.h"
@@ -36,7 +37,10 @@ WindowManager::WindowManager(
     m_mouse(connection, *this),
     m_dispatcher(*this, m_keyboard, m_mouse),
     m_ipc(),
-    m_bar(connection)
+    m_bar(connection),
+    m_launcher(connection),
+    m_notepad(connection),
+    m_animator()
 {
 }
 
@@ -48,6 +52,10 @@ void WindowManager::Initialize()
 
     m_bar.Configure(m_config, m_monitors.Primary().Geometry());
     m_bar.Show();
+
+    m_launcher.Configure(m_config, m_monitors.Primary().Geometry());
+    m_notepad.Configure(m_config, m_monitors.Primary().Geometry());
+    m_bar.SetNotepadActive(m_notepad.HasContent());
 
     m_keyboard.Configure(m_config);
     m_mouse.Configure(m_config);
@@ -85,7 +93,21 @@ IPCServer& WindowManager::Ipc()
 
 void WindowManager::Tick()
 {
+    if (m_animator.Active())
+        m_animator.Step(m_connection);
+
+    if (m_launcher.IsOpen())
+        m_launcher.Blink();
+
+    if (m_notepad.IsOpen())
+        m_notepad.Blink();
+
     m_bar.Redraw();
+}
+
+bool WindowManager::HasActiveAnimation() const
+{
+    return m_animator.Active();
 }
 
 // --- X11 event handlers -----------------------------------------------------
@@ -165,6 +187,13 @@ void WindowManager::HandleEnterNotify(const XCrossingEvent& event)
     if (event.mode != NotifyNormal || !pointerActuallyMoved)
         return;
 
+    // The Launcher/Notepad hold input focus for typing - a background
+    // window happening to be under the pointer must not steal it back
+    // (that's the exact "hotkeys/typing quietly stop working" failure
+    // mode the Super+Q hardening elsewhere in this file is about).
+    if (m_launcher.IsOpen() || m_notepad.IsOpen())
+        return;
+
     if (!m_config.GetBool("general.focus_follows_mouse", true))
         return;
 
@@ -195,6 +224,16 @@ void WindowManager::HandlePropertyNotify(const XPropertyEvent& event)
 
 void WindowManager::HandleButtonPressOnClient(const XButtonEvent& event)
 {
+    // Clicking a background window while the Launcher/Notepad is open
+    // reads as "I'm done with this" - dismiss it first (as a cancel,
+    // not a run) rather than leaving it visually open but no longer
+    // able to receive the typing it needs focus for.
+    if (m_launcher.IsOpen())
+        CloseLauncher(false);
+
+    if (m_notepad.IsOpen())
+        CloseNotepad();
+
     if (m_repository.Contains(event.window))
         Focus(event.window);
 
@@ -208,6 +247,35 @@ void WindowManager::HandleExpose(const XExposeEvent& event)
 
     if (event.window == m_bar.WindowId())
         m_bar.Redraw();
+    else if (event.window == m_launcher.WindowId())
+        m_launcher.HandleExpose();
+    else if (event.window == m_notepad.WindowId())
+        m_notepad.HandleExpose();
+}
+
+bool WindowManager::HandleModalKeyPress(const XKeyEvent& event)
+{
+    if (m_launcher.IsOpen())
+    {
+        switch (m_launcher.HandleKeyPress(event))
+        {
+            case LauncherResult::Confirmed: CloseLauncher(true);  break;
+            case LauncherResult::Cancelled: CloseLauncher(false); break;
+            case LauncherResult::Editing:                         break;
+        }
+
+        return true;
+    }
+
+    if (m_notepad.IsOpen())
+    {
+        if (m_notepad.HandleKeyPress(event) == NotepadResult::Closed)
+            CloseNotepad();
+
+        return true;
+    }
+
+    return false;
 }
 
 bool WindowManager::IsManaged(WindowID id) const
@@ -224,7 +292,7 @@ void WindowManager::Execute(const Command& command)
         case CommandType::Exec:
         {
             std::string resolved = m_config.GetString("exec." + command.stringArg);
-            Process::Spawn(resolved.empty() ? command.stringArg : resolved);
+            Process::Spawn(resolved.empty() ? command.stringArg : resolved, m_connection.DisplayName());
             break;
         }
 
@@ -239,6 +307,8 @@ void WindowManager::Execute(const Command& command)
         case CommandType::Flip:             FlipFocused();                         break;
         case CommandType::Reload:           ReloadConfig();                        break;
         case CommandType::Quit:             m_running = false;                     break;
+        case CommandType::LauncherToggle:   ToggleLauncher();                      break;
+        case CommandType::NotepadToggle:    ToggleNotepad();                       break;
 
         case CommandType::NoCommand:
         default:
@@ -276,6 +346,105 @@ void WindowManager::ResizeWindow(ManagedWindow* window, int dx, int dy)
 void WindowManager::SetResizingCursor(bool resizing)
 {
     m_cursor.SetResizing(resizing);
+}
+
+void WindowManager::BeginSwapDrag(ManagedWindow* window, const Point& cursor)
+{
+    if (!window || !window->IsTiled())
+        return;
+
+    m_activeDragWindow = window;
+    m_dragHoverTarget = nullptr;
+
+    const Rect& geometry = window->Geometry();
+    m_dragOffsetX = cursor.x - geometry.x;
+    m_dragOffsetY = cursor.y - geometry.y;
+    m_dragCurrentRect = geometry;
+
+    m_connection.Raise(window->Id());
+    m_cursor.SetDragging(true);
+}
+
+void WindowManager::UpdateSwapDrag(ManagedWindow* window, const Point& cursor)
+{
+    if (!window || window != m_activeDragWindow)
+        return;
+
+    // The window "breaks off and moves with the cursor" - only its
+    // position changes, and only on screen; nothing else in the tree
+    // is touched until the button is released.
+    m_dragCurrentRect.x = cursor.x - m_dragOffsetX;
+    m_dragCurrentRect.y = cursor.y - m_dragOffsetY;
+
+    m_connection.MoveWindowTo(window->Id(), m_dragCurrentRect.x, m_dragCurrentRect.y);
+
+    // Highlight whichever tiled window the cursor is currently over,
+    // so - per the doc's "safety feedback loop" - it's clear exactly
+    // what will be swapped with before that's committed by releasing
+    // the button.
+    ManagedWindow* hovered = m_workspaces.Get(window->Workspace()).Tree().HitTest(cursor);
+
+    if (hovered == window)
+        hovered = nullptr;
+
+    if (hovered == m_dragHoverTarget)
+        return;
+
+    if (m_dragHoverTarget)
+        RefreshBorderColor(m_dragHoverTarget);
+
+    m_dragHoverTarget = hovered;
+
+    if (m_dragHoverTarget && m_dragHoverTarget->BorderWidth() > 0)
+        m_connection.SetBorderColor(m_dragHoverTarget->Id(), ParseColor("general.border_color_active", "0x89b4fa"));
+}
+
+void WindowManager::EndSwapDrag(ManagedWindow* window, const Point& cursor)
+{
+    if (!window || window != m_activeDragWindow)
+        return;
+
+    m_cursor.SetDragging(false);
+
+    if (m_dragHoverTarget)
+        RefreshBorderColor(m_dragHoverTarget);
+
+    ManagedWindow* target = m_workspaces.Get(window->Workspace()).Tree().HitTest(cursor);
+
+    if (target == window)
+        target = nullptr;
+
+    Rect fromRect = m_dragCurrentRect;
+
+    // Clear the drag state *before* SwapWindows()/Arrange() run below,
+    // so Arrange() is free to reposition this window like any other
+    // tiled one again.
+    m_activeDragWindow = nullptr;
+    m_dragHoverTarget = nullptr;
+
+    constexpr int kSwapAnimationMs = 160;
+
+    if (target)
+    {
+        Rect targetFromRect = target->Geometry();
+
+        // Arrange() (called inside SwapWindows()) immediately snaps
+        // both windows to their new final rects - the two Animator
+        // calls below then replay that transition visually, from
+        // wherever each window actually was, instead of it happening
+        // as an instant jump.
+        SwapWindows(window, target);
+
+        m_animator.Start(window, fromRect, window->Geometry(), kSwapAnimationMs);
+        m_animator.Start(target, targetFromRect, target->Geometry(), kSwapAnimationMs);
+    }
+    else
+    {
+        // No valid drop target - snap back to exactly where it was.
+        // The tree assignment was never touched during the drag, so
+        // window->Geometry() still holds the original tiled rect.
+        m_animator.Start(window, fromRect, window->Geometry(), kSwapAnimationMs);
+    }
 }
 
 // --- IPCServer-facing API ---------------------------------------------------
@@ -330,6 +499,24 @@ void WindowManager::Manage(WindowID id)
     if (m_repository.Contains(id))
         return;
 
+    // Never manage Kohiko's own utility windows. They're all created
+    // override_redirect (so X never even offers them to us as a
+    // MapRequest in the first place), but checking their IDs here too
+    // is cheap, explicit insurance that Super+Q - or anything else
+    // that walks m_repository - can *never* end up targeting the bar,
+    // the launcher, or the notepad, no matter what changes elsewhere.
+    // That guarantee is what "the panel should never close this
+    // combination" means in practice: CloseFocused() only ever acts on
+    // m_repository.Focused(), and this is what keeps that set free of
+    // Kohiko's own popups by construction, not by convention.
+    if (id == m_bar.WindowId() || id == m_launcher.WindowId() || id == m_notepad.WindowId())
+        return;
+
+    XWindowAttributes attrs{};
+
+    if (m_connection.GetWindowAttributes(id, attrs) && attrs.override_redirect)
+        return;
+
     ManagedWindow* window = m_repository.Add(id);
 
     window->SetTitle(m_connection.GetWindowTitle(id, m_atoms));
@@ -368,16 +555,66 @@ void WindowManager::Manage(WindowID id)
         m_connection.MoveResizeWindow(id, geometry);
         m_connection.SetBorderWidth(id, window->BorderWidth());
     }
+    else if (TryTile(window, window->Workspace()))
+    {
+        // Tiled on the current workspace - the common case.
+    }
     else
     {
-        window->SetState(WindowState::Tiled);
-        m_workspaces.Get(window->Workspace()).Tree().Insert(window);
+        int currentWorkspace = window->Workspace();
+        int alternate = FindWorkspaceWithRoom(currentWorkspace);
+
+        if (alternate != 0 && TryTile(window, alternate))
+        {
+            Logger::Info(
+                "Workspace " + std::to_string(currentWorkspace) +
+                " has no room for another tile without dropping below the "
+                "configured minimum size - opened window " +
+                std::to_string(static_cast<unsigned long>(id)) +
+                " on workspace " + std::to_string(alternate) + " instead.");
+        }
+        else
+        {
+            // Every workspace is full. This is the designated
+            // extension point for something smarter later (auto-
+            // creating a new workspace, prompting the user, etc) -
+            // for now, the fallback that actually guarantees "no
+            // window ever goes beyond the screen" is to open it
+            // floating instead of forcing an undersized tile.
+            window->SetState(WindowState::Floating);
+
+            Rect geometry = CenteredFloatingRect(0.5f, 0.5f);
+            window->SetGeometry(geometry);
+            window->SetFloatingGeometry(geometry);
+
+            m_connection.MoveResizeWindow(id, geometry);
+            m_connection.SetBorderWidth(id, window->BorderWidth());
+
+            Logger::Warning(
+                "No workspace has room for another tile without dropping "
+                "below the configured minimum size - opened window " +
+                std::to_string(static_cast<unsigned long>(id)) + " floating instead.");
+        }
     }
 
-    m_connection.MapWindow(id);
-
-    Arrange();
-    Focus(id);
+    // A window the fallback above redistributed onto a *different*
+    // workspace must stay unmapped and unfocused, exactly like every
+    // other window living on a workspace that isn't the current one -
+    // SwitchWorkspace() is what maps it and gives it a chance at focus
+    // once the user actually switches there. Mapping/focusing it here
+    // regardless of which workspace it landed on would show a window
+    // nobody asked to see right now and steal focus from whatever *is*
+    // currently visible.
+    if (window->Workspace() == m_workspaces.CurrentId())
+    {
+        m_connection.MapWindow(id);
+        Arrange();
+        Focus(id);
+    }
+    else
+    {
+        Arrange();
+    }
 }
 
 void WindowManager::Unmanage(WindowID id)
@@ -416,16 +653,12 @@ void WindowManager::Focus(WindowID id)
 
     m_connection.SetInputFocus(id);
 
-    unsigned long activeColor   = ParseColor("general.border_color_active",   "0x89b4fa");
-    unsigned long inactiveColor = ParseColor("general.border_color_inactive", "0x45475a");
-
-    if (window->BorderWidth() > 0)
-        m_connection.SetBorderColor(id, activeColor);
+    RefreshBorderColor(window);
 
     for (ManagedWindow* other : m_repository.Visible(m_workspaces.CurrentId()))
     {
-        if (other->Id() != id && other->BorderWidth() > 0)
-            m_connection.SetBorderColor(other->Id(), inactiveColor);
+        if (other->Id() != id)
+            RefreshBorderColor(other);
     }
 
     m_bar.SetTitle(window->Title());
@@ -452,10 +685,7 @@ void WindowManager::Arrange()
 {
     Workspace& workspace = m_workspaces.Current();
     const Rect& monitor = m_monitors.Primary().Geometry();
-
-    Rect tilingArea = monitor;
-    tilingArea.y += m_bar.Height();
-    tilingArea.height -= m_bar.Height();
+    Rect tilingArea = TilingArea();
 
     LayoutEngine::Params params;
     params.innerGap     = m_config.GetInt("general.inner_gap", 6);
@@ -471,6 +701,9 @@ void WindowManager::Arrange()
 
     for (ManagedWindow* window : m_repository.Visible(m_workspaces.CurrentId()))
     {
+        if (window == m_activeDragWindow)
+            continue; // being driven directly by the Swap drag right now - don't snap it back
+
         if (window->IsFullscreen())
         {
             fullscreenWindow = window;
@@ -504,9 +737,41 @@ void WindowManager::Arrange()
 
     m_bar.SetWorkspaces(m_workspaces.Count(), m_workspaces.CurrentId());
     m_bar.SetScratchpadActive(m_scratchpad.HasWindow() && m_scratchpad.IsVisible());
+    m_bar.SetNotepadActive(m_notepad.HasContent());
     m_bar.Redraw();
 
     m_connection.Flush();
+}
+
+Rect WindowManager::TilingArea()
+{
+    const Rect& monitor = m_monitors.Primary().Geometry();
+
+    Rect area = monitor;
+    area.y += m_bar.Height();
+    area.height -= m_bar.Height();
+
+    return area;
+}
+
+void WindowManager::RefreshWorkspaceGeometry(int workspaceId)
+{
+    Workspace& workspace = m_workspaces.Get(workspaceId);
+
+    if (workspace.Tree().Empty())
+        return;
+
+    LayoutEngine::Params params;
+    params.innerGap     = m_config.GetInt("general.inner_gap", 6);
+    params.outerGap     = m_config.GetInt("general.outer_gap", 8);
+    params.borderWidth  = m_config.GetInt("general.border_size", 2);
+    params.smartGaps    = m_config.GetBool("general.smart_gaps", true);
+    params.smartBorders = m_config.GetBool("general.smart_borders", true);
+
+    // Same computation Arrange() would do for the current workspace -
+    // just without the X11 MoveResizeWindow/MapWindow side that only
+    // makes sense for whatever's actually on screen right now.
+    m_layout.Apply(workspace.Tree().Root(), TilingArea(), params);
 }
 
 void WindowManager::SwitchWorkspace(int id)
@@ -550,14 +815,37 @@ void WindowManager::MoveFocusedToWorkspace(int id)
         return;
 
     int oldWorkspaceId = window->Workspace();
+    bool wasTiled = window->IsTiled();
 
-    if (window->IsTiled())
+    if (wasTiled)
         m_workspaces.Get(oldWorkspaceId).Tree().Remove(window);
 
     window->SetWorkspace(id);
 
-    if (window->IsTiled())
-        m_workspaces.Get(id).Tree().Insert(window);
+    if (wasTiled && !TryTile(window, id))
+    {
+        // TryTile() only fails the capacity check, so the window isn't
+        // in any tree right now - land it floating instead of forcing
+        // an undersized tile. Explicit user intent ("move THIS window
+        // to workspace `id`") still wins: it lands on workspace `id`,
+        // just not tiled there.
+        window->SetState(WindowState::Floating);
+
+        Rect geometry = window->FloatingGeometry();
+
+        if (geometry.width <= 0 || geometry.height <= 0)
+            geometry = CenteredFloatingRect(0.5f, 0.5f);
+
+        window->SetGeometry(geometry);
+        window->SetFloatingGeometry(geometry);
+
+        Logger::Warning(
+            "Workspace " + std::to_string(id) +
+            " has no room for another tile without dropping below the "
+            "configured minimum size - moved window " +
+            std::to_string(static_cast<unsigned long>(window->Id())) +
+            " there floating instead.");
+    }
 
     window->IgnoreNextUnmap();
     m_connection.UnmapWindow(window->Id());
@@ -598,8 +886,19 @@ void WindowManager::ToggleFloating()
     else if (window->IsFloating())
     {
         window->SetFloatingGeometry(window->Geometry());
-        window->SetState(WindowState::Tiled);
-        m_workspaces.Get(window->Workspace()).Tree().Insert(window);
+
+        if (!TryTile(window, window->Workspace()))
+        {
+            // No room to tile it right now (bug #4's capacity check) -
+            // simplest safe behaviour is to just leave it floating
+            // rather than forcing an undersized tile; the user can
+            // try again once something else closes.
+            Logger::Warning(
+                "Workspace " + std::to_string(window->Workspace()) +
+                " has no room for another tile right now - window " +
+                std::to_string(static_cast<unsigned long>(window->Id())) +
+                " stays floating.");
+        }
     }
 
     Arrange();
@@ -741,6 +1040,146 @@ void WindowManager::ReloadConfig()
     m_mouse.Configure(m_config);
 
     Arrange();
+}
+
+void WindowManager::ToggleLauncher()
+{
+    if (m_launcher.IsOpen())
+    {
+        CloseLauncher(false);
+        return;
+    }
+
+    if (m_notepad.IsOpen())
+        CloseNotepad();
+
+    ManagedWindow* focused = m_repository.Focused();
+    m_focusBeforeModal = focused ? focused->Id() : 0;
+
+    m_launcher.Open();
+    m_connection.SetInputFocus(m_launcher.WindowId());
+}
+
+void WindowManager::CloseLauncher(bool run)
+{
+    if (!m_launcher.IsOpen())
+        return;
+
+    std::string command = m_launcher.Query();
+
+    m_launcher.Close();
+
+    if (run && !command.empty())
+        Process::Spawn(command, m_connection.DisplayName());
+
+    RestoreFocusAfterModal();
+}
+
+void WindowManager::ToggleNotepad()
+{
+    if (m_notepad.IsOpen())
+    {
+        CloseNotepad();
+        return;
+    }
+
+    if (m_launcher.IsOpen())
+        CloseLauncher(false);
+
+    ManagedWindow* focused = m_repository.Focused();
+    m_focusBeforeModal = focused ? focused->Id() : 0;
+
+    m_notepad.Open();
+    m_bar.SetNotepadActive(true);
+    m_bar.Redraw();
+    m_connection.SetInputFocus(m_notepad.WindowId());
+}
+
+void WindowManager::CloseNotepad()
+{
+    if (!m_notepad.IsOpen())
+        return;
+
+    m_notepad.Close();
+    m_bar.SetNotepadActive(m_notepad.HasContent());
+    m_bar.Redraw();
+
+    RestoreFocusAfterModal();
+}
+
+void WindowManager::RestoreFocusAfterModal()
+{
+    if (m_focusBeforeModal != 0 && m_repository.Contains(m_focusBeforeModal))
+        Focus(m_focusBeforeModal);
+    else
+        FocusNextAvailable();
+
+    m_focusBeforeModal = 0;
+}
+
+bool WindowManager::TryTile(ManagedWindow* window, int workspaceId)
+{
+    if (!window || workspaceId < 1 || workspaceId > m_workspaces.Count())
+        return false;
+
+    int innerGap  = m_config.GetInt("general.inner_gap", 6);
+    int outerGap  = m_config.GetInt("general.outer_gap", 8);
+    int minWidth  = m_config.GetInt("general.min_tile_width", 100);
+    int minHeight = m_config.GetInt("general.min_tile_height", 60);
+
+    // Matches LayoutEngine::Apply's own Shrunk(outerGap) exactly, so
+    // this check and the real layout can never disagree about what a
+    // freshly-split leaf's rect would be.
+    Rect tilingArea = TilingArea().Shrunk(outerGap);
+
+    if (!m_workspaces.Get(workspaceId).Tree().HasSpaceForAnotherWindow(tilingArea, innerGap, minWidth, minHeight))
+        return false;
+
+    window->SetWorkspace(workspaceId);
+    window->SetState(WindowState::Tiled);
+    m_workspaces.Get(workspaceId).Tree().Insert(window);
+
+    // Arrange() (called by every caller of TryTile() right after) only
+    // ever lays out the *current* workspace - for any other, keep its
+    // cached node geometry fresh ourselves so the next insertion's
+    // AnchorLeaf()/DirectionForRect() has something real to work from
+    // instead of a stale {0,0,0,0}.
+    if (workspaceId != m_workspaces.CurrentId())
+        RefreshWorkspaceGeometry(workspaceId);
+
+    return true;
+}
+
+int WindowManager::FindWorkspaceWithRoom(int excludeId)
+{
+    int innerGap  = m_config.GetInt("general.inner_gap", 6);
+    int outerGap  = m_config.GetInt("general.outer_gap", 8);
+    int minWidth  = m_config.GetInt("general.min_tile_width", 100);
+    int minHeight = m_config.GetInt("general.min_tile_height", 60);
+
+    Rect tilingArea = TilingArea().Shrunk(outerGap);
+
+    for (int id = 1; id <= m_workspaces.Count(); ++id)
+    {
+        if (id == excludeId)
+            continue;
+
+        if (m_workspaces.Get(id).Tree().HasSpaceForAnotherWindow(tilingArea, innerGap, minWidth, minHeight))
+            return id;
+    }
+
+    return 0;
+}
+
+void WindowManager::RefreshBorderColor(ManagedWindow* window)
+{
+    if (!window || window->BorderWidth() <= 0)
+        return;
+
+    unsigned long activeColor   = ParseColor("general.border_color_active",   "0x89b4fa");
+    unsigned long inactiveColor = ParseColor("general.border_color_inactive", "0x45475a");
+
+    m_connection.SetBorderColor(window->Id(), window->Focused() ? activeColor : inactiveColor);
 }
 
 Rect WindowManager::CenteredFloatingRect(float widthFraction, float heightFraction)

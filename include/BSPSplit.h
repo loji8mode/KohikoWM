@@ -50,6 +50,18 @@ public:
     // Flip(): mirrors the two panes without touching the split axis.
     void SwapChildren();
 
+    // Splits `area` into the two child rects this split would produce
+    // given its own direction/ratio and `innerGap` between them.
+    // Shared by LayoutEngine (real layout) and BSPTree (the "would
+    // this leaf still be a legal size after one more split?" capacity
+    // check) so the two pieces of math can never drift apart.
+    void Subdivide(
+        const Rect& area,
+        int innerGap,
+        Rect& first,
+        Rect& second
+    ) const;
+
 private:
 
     SplitDirection m_direction;

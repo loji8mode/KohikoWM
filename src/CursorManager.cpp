@@ -20,6 +20,7 @@ void CursorManager::Initialize()
 
     m_normalCursor = XCreateFontCursor(display, XC_left_ptr);
     m_resizeCursor = XCreateFontCursor(display, XC_sizing);
+    m_dragCursor = XCreateFontCursor(display, XC_fleur);
 
     XDefineCursor(display, m_connection.Root(), m_normalCursor);
 }
@@ -34,6 +35,18 @@ void CursorManager::SetResizing(
         m_connection.GetDisplay(),
         m_connection.Root(),
         resizing ? m_resizeCursor : m_normalCursor);
+}
+
+void CursorManager::SetDragging(
+    bool dragging)
+{
+    if (!m_normalCursor)
+        return;
+
+    XDefineCursor(
+        m_connection.GetDisplay(),
+        m_connection.Root(),
+        dragging ? m_dragCursor : m_normalCursor);
 }
 
 }

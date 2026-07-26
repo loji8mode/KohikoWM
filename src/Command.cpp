@@ -83,6 +83,14 @@ Command Command::Parse(const std::string& text)
     {
         command.type = CommandType::Quit;
     }
+    else if (action == "launcher_toggle" || action == "launcher")
+    {
+        command.type = CommandType::LauncherToggle;
+    }
+    else if (action == "notepad_toggle" || action == "notepad")
+    {
+        command.type = CommandType::NotepadToggle;
+    }
 
     return command;
 }

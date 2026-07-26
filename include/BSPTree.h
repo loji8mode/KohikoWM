@@ -85,12 +85,43 @@ public:
     // Finds whichever leaf's last computed Geometry() contains `p`.
     ManagedWindow* HitTest(const Point& p) const;
 
+    // Answers "if Insert() were called right now, would either half of
+    // the split it creates come out smaller than minWidth x minHeight?"
+    // - without mutating anything. Re-derives the anchor leaf's true
+    // rect from `tilingArea` (rather than trusting each node's cached
+    // Geometry(), which is stale for any workspace that isn't the
+    // currently-arranged one) so this is safe to call against a
+    // workspace other than the current one.
+    bool HasSpaceForAnotherWindow(
+        const Rect& tilingArea,
+        int innerGap,
+        int minWidth,
+        int minHeight
+    ) const;
+
     // Debug / IPC dump (`kohikoctl tree`).
     std::string Serialize() const;
 
 private:
 
     BSPLeaf* FindLeaf(BSPNode* node, ManagedWindow* window) const;
+
+    // The leaf Insert() would attach a new window next to: the cached
+    // "last focused" one, or - if nothing has been focused yet - the
+    // last leaf found by a plain walk of the tree.
+    BSPLeaf* AnchorLeaf() const;
+
+    // Recomputes one leaf's rect from scratch by walking down from
+    // `node`, applying each split's Subdivide() in turn - the same
+    // math LayoutEngine uses, just without writing the result back
+    // onto the nodes. Returns false if `target` isn't under `node`.
+    bool ComputeLeafGeometry(
+        BSPNode* node,
+        BSPLeaf* target,
+        const Rect& area,
+        int innerGap,
+        Rect& out
+    ) const;
 
     void CollectLeaves(BSPNode* node, std::vector<BSPLeaf*>& out) const;
 

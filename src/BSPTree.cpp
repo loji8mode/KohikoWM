@@ -37,15 +37,21 @@ int BSPTree::Count() const
 
 ManagedWindow* BSPTree::FocusedWindow() const
 {
+    BSPLeaf* anchor = AnchorLeaf();
+    return anchor ? anchor->Window() : nullptr;
+}
+
+BSPLeaf* BSPTree::AnchorLeaf() const
+{
     if (m_lastFocused)
-        return m_lastFocused->Window();
+        return m_lastFocused;
 
     // Fallback: nothing has ever been focused (e.g. right after the
     // very first window opened) - just take whatever leaf exists.
     std::vector<BSPLeaf*> leaves;
     CollectLeaves(m_root.get(), leaves);
 
-    return leaves.empty() ? nullptr : leaves.back()->Window();
+    return leaves.empty() ? nullptr : leaves.back();
 }
 
 void BSPTree::Insert(ManagedWindow* window)
@@ -61,18 +67,10 @@ void BSPTree::Insert(ManagedWindow* window)
         return;
     }
 
-    BSPLeaf* anchor = m_lastFocused;
+    BSPLeaf* anchor = AnchorLeaf();
 
     if (!anchor)
-    {
-        std::vector<BSPLeaf*> leaves;
-        CollectLeaves(m_root.get(), leaves);
-
-        if (leaves.empty())
-            return;
-
-        anchor = leaves.back();
-    }
+        return;
 
     SplitDirection direction = DirectionForRect(anchor->Geometry());
 
@@ -366,6 +364,37 @@ ManagedWindow* BSPTree::HitTest(const Point& p) const
     return nullptr;
 }
 
+bool BSPTree::HasSpaceForAnotherWindow(
+    const Rect& tilingArea,
+    int innerGap,
+    int minWidth,
+    int minHeight) const
+{
+    if (!m_root)
+        return true; // first window on this workspace always fits
+
+    BSPLeaf* anchor = AnchorLeaf();
+
+    if (!anchor)
+        return true; // unreachable in practice (m_root implies >=1 leaf), but harmless
+
+    Rect anchorRect;
+
+    if (!ComputeLeafGeometry(m_root.get(), anchor, tilingArea, innerGap, anchorRect))
+        return true; // couldn't locate the anchor - don't block insertion over it
+
+    // Mirrors exactly what Insert() is about to do: wrap the anchor in
+    // a brand-new 50/50 split, oriented from its current aspect ratio.
+    BSPSplit probe(DirectionForRect(anchorRect));
+
+    Rect first;
+    Rect second;
+    probe.Subdivide(anchorRect, innerGap, first, second);
+
+    return first.width  >= minWidth  && first.height  >= minHeight &&
+           second.width >= minWidth  && second.height >= minHeight;
+}
+
 std::string BSPTree::Serialize() const
 {
     return m_root ? SerializeNode(m_root.get()) : "null";
@@ -405,6 +434,37 @@ void BSPTree::CollectLeaves(BSPNode* node, std::vector<BSPLeaf*>& out) const
 
     CollectLeaves(split->Left(), out);
     CollectLeaves(split->Right(), out);
+}
+
+bool BSPTree::ComputeLeafGeometry(
+    BSPNode* node,
+    BSPLeaf* target,
+    const Rect& area,
+    int innerGap,
+    Rect& out) const
+{
+    if (!node)
+        return false;
+
+    if (node->IsLeaf())
+    {
+        if (node != target)
+            return false;
+
+        out = area;
+        return true;
+    }
+
+    auto* split = static_cast<BSPSplit*>(node);
+
+    Rect first;
+    Rect second;
+    split->Subdivide(area, innerGap, first, second);
+
+    if (ComputeLeafGeometry(split->Left(), target, first, innerGap, out))
+        return true;
+
+    return ComputeLeafGeometry(split->Right(), target, second, innerGap, out);
 }
 
 SplitDirection BSPTree::DirectionForRect(const Rect& rect)

@@ -21,7 +21,9 @@ enum class CommandType
     Rotate,
     Flip,
     Reload,
-    Quit
+    Quit,
+    LauncherToggle,
+    NotepadToggle
 };
 
 // A parsed, ready-to-run action.
