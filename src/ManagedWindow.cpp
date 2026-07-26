@@ -212,6 +212,16 @@ int ManagedWindow::MinHeight() const
     return m_minHeight;
 }
 
+void ManagedWindow::SetIgnoresOwnMinSizeForTiling(bool ignore)
+{
+    m_ignoresOwnMinSizeForTiling = ignore;
+}
+
+bool ManagedWindow::IgnoresOwnMinSizeForTiling() const
+{
+    return m_ignoresOwnMinSizeForTiling;
+}
+
 void ManagedWindow::RegisterTilingMisbehavior()
 {
     ++m_tilingMisbehaviorCount;

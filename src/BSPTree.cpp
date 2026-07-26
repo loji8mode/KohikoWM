@@ -584,7 +584,12 @@ void BSPTree::EffectiveMinSize(
     outMinWidth  = floorWidth;
     outMinHeight = floorHeight;
 
-    if (window)
+    // `windowrule=tile` opts a window out of having its own declared
+    // minimum count here at all - see IgnoresOwnMinSizeForTiling()'s
+    // comment in ManagedWindow.h for why. Every other window (the
+    // overwhelming majority, since this defaults to false) behaves
+    // exactly as before.
+    if (window && !window->IgnoresOwnMinSizeForTiling())
     {
         // MinWidth()/MinHeight() default to 0 when a client never
         // declared WM_NORMAL_HINTS, so max() here just falls through
