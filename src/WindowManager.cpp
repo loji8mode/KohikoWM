@@ -82,6 +82,21 @@ void WindowManager::Initialize()
             return HandleIpcCommand(request);
         });
 
+    // Keyboard layouts are applied via setxkbmap (real XKB groups),
+    // not anything Kohiko's own KeyboardManager tracks - that's what
+    // makes typing in any listed language work in every window, not
+    // just ones Kohiko manages, and it's why Super+H/J/K/L etc. never
+    // needed special-casing for non-English layouts in the first
+    // place: KeyboardManager grabs by physical keycode (see its class
+    // comment), and a keycode means the same physical key no matter
+    // which XKB group is currently active.
+    ApplyKeyboardLayouts();
+
+    // Autostart programs launch exactly once here, after the bar/tray/
+    // launcher above are already up, so anything they immediately try
+    // to dock (a tray icon, a notification) has somewhere to land.
+    RunAutostart();
+
     Arrange();
 
 
@@ -1147,7 +1162,80 @@ void WindowManager::ReloadConfig()
             "launcher.file_manager",
             "pcmanfm");
 
+    // Re-applying layouts is harmless (setxkbmap just sets the same
+    // thing again) so someone editing `keyboard.layouts` sees it take
+    // effect on reload like everything else - RunAutostart() is
+    // deliberately NOT called here, see its declaration in the header.
+    ApplyKeyboardLayouts();
+
     Arrange();
+}
+
+void WindowManager::ApplyKeyboardLayouts()
+{
+    std::vector<std::string> layouts =
+        Utils::SplitWhitespace(
+            m_config.GetString("keyboard.layouts", "us"));
+
+    if (layouts.empty())
+        return;
+
+    std::string joined;
+
+    for (std::size_t i = 0; i < layouts.size(); ++i)
+    {
+        // `keyboard.layouts=` is meant to be comma-separated
+        // (matching setxkbmap's own -layout syntax), but a stray
+        // space after a comma shouldn't silently break the whole
+        // list, so tokenize on whitespace first and then strip any
+        // trailing/leading commas off each piece before rejoining.
+        std::string token = layouts[i];
+
+        while (!token.empty() && token.front() == ',')
+            token.erase(token.begin());
+
+        while (!token.empty() && token.back() == ',')
+            token.pop_back();
+
+        if (token.empty())
+            continue;
+
+        if (!joined.empty())
+            joined += ",";
+
+        joined += token;
+    }
+
+    if (joined.empty())
+        return;
+
+    std::string command = "setxkbmap -layout " + joined;
+
+    // Only meaningful (and only valid setxkbmap syntax) once there's
+    // more than one layout to switch between - with a single layout
+    // there's nothing to toggle.
+    if (joined.find(',') != std::string::npos)
+    {
+        std::string toggle =
+            m_config.GetString(
+                "keyboard.layout_toggle",
+                "grp:alt_shift_toggle");
+
+        if (!toggle.empty())
+            command += " -option " + toggle;
+    }
+
+    Process::Spawn(command, m_connection.DisplayName());
+}
+
+void WindowManager::RunAutostart()
+{
+    for (const std::string& program :
+         Utils::SplitWhitespace(
+             m_config.GetString("auto_start_programs")))
+    {
+        Process::Spawn(program, m_connection.DisplayName());
+    }
 }
 
 void WindowManager::ToggleLauncher()

@@ -55,6 +55,32 @@ float ParsePercent(
     }
 }
 
+std::vector<std::string> SplitWhitespace(
+    const std::string& value)
+{
+    std::vector<std::string> tokens;
+
+    std::size_t pos = 0;
+
+    while (pos < value.size())
+    {
+        std::size_t start = value.find_first_not_of(" \t\r\n", pos);
+
+        if (start == std::string::npos)
+            break;
+
+        std::size_t end = value.find_first_of(" \t\r\n", start);
+
+        if (end == std::string::npos)
+            end = value.size();
+
+        tokens.push_back(value.substr(start, end - start));
+        pos = end;
+    }
+
+    return tokens;
+}
+
 namespace
 {
 

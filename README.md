@@ -27,6 +27,8 @@ a full compositor.
 - [Building](#building)
 - [Running it](#running-it)
 - [Configuration](#configuration)
+- [Autostart](#autostart)
+- [Keyboard layouts / languages](#keyboard-layouts--languages)
 - [Default keybindings](#default-keybindings)
 - [EWMH support](#ewmh-support)
 - [The mouse: swap and resize](#the-mouse-swap-and-resize)
@@ -143,6 +145,11 @@ notepad.height=50%
 exec.terminal=xterm              # referenced from `bind=... exec terminal`
 exec.screenshot=flameshot gui    # referenced from `bind=Print exec screenshot`
 
+auto_start_programs=telegram-desktop discord zen-browser  # launched once at startup
+
+keyboard.layouts=us,ua           # XKB layouts, applied via setxkbmap
+keyboard.layout_toggle=grp:alt_shift_toggle
+
 mouse.swap=SUPER+BTN1
 mouse.resize=SUPER+BTN3
 
@@ -151,7 +158,47 @@ bind=SUPER+Q close
 ```
 
 Reload after editing without restarting: `kohikoctl reload` (also bound to
-`Super+Shift+C` by default).
+`Super+Shift+C` by default). `auto_start_programs` is the one exception -
+it only ever runs right after Kohiko itself starts, never on reload, so
+reloading the config doesn't relaunch every autostart program.
+
+## Autostart
+
+`auto_start_programs=` takes a space-separated list of commands, each
+launched once, right after the bar/tray/launcher finish starting up -
+no keybind needed:
+
+```ini
+auto_start_programs=telegram-desktop discord zen-browser
+```
+
+Each entry runs exactly the way `exec.<name>=` does (through `/bin/sh -c`,
+forced onto this session's `DISPLAY`), so anything you could put after
+`exec.terminal=` works here too. Leave it empty, or delete the line, to
+autostart nothing.
+
+## Keyboard layouts / languages
+
+Kohiko applies `keyboard.layouts=` via `setxkbmap` once at startup (and
+again on reload), so it isn't limited to English - list any XKB layouts
+you want, comma-separated:
+
+```ini
+keyboard.layouts=us,ua
+keyboard.layout_toggle=grp:alt_shift_toggle
+```
+
+This is real XKB, so every layout listed works everywhere - in every
+window, not just some of them - the same as it would under any other
+window manager. `keyboard.layout_toggle` is any `setxkbmap` `grp:`
+option; the default above cycles through the listed layouts with
+Alt+Shift and is ignored while only one layout is configured.
+
+Kohiko's own keybinds are unaffected by any of this either way:
+`KeyboardManager` grabs `bind=` entries by physical keycode (see
+[Architecture](#architecture)), so `Super+H/J/K/L` and the rest keep
+working identically no matter which layout above is currently active -
+only what other programs see you type changes.
 
 ## Default keybindings
 

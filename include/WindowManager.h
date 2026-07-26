@@ -151,6 +151,20 @@ private:
     void CloseNotepad();
     void RestoreFocusAfterModal();
 
+    // Applies `keyboard.layouts`/`keyboard.layout_toggle` via
+    // setxkbmap - see the class comment on the call site in
+    // Initialize() for why this makes every listed language work in
+    // every window, not just ones Kohiko manages. Safe to call again
+    // on `reload` (setxkbmap is idempotent), unlike RunAutostart().
+    void ApplyKeyboardLayouts();
+
+    // Launches every program listed in `auto_start_programs` exactly
+    // once, right after startup - see Initialize(). Deliberately never
+    // called from ReloadConfig(), or `kohikoctl reload` would relaunch
+    // every autostart program (a second Telegram, a second Discord, ...)
+    // every time someone reloads the config.
+    void RunAutostart();
+
     // The monitor area actually available for tiling (primary monitor
     // minus the bar), shared by Arrange() and the capacity checks
     // below so they can never disagree about what "fits".

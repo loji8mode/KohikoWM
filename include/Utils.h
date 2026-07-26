@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace Kohiko::Utils
 {
@@ -18,6 +19,13 @@ std::string Lower(
 float ParsePercent(
     const std::string& value,
     float fallback
+);
+
+// Splits `value` on runs of whitespace, dropping empty tokens - used
+// for space-separated config lists such as `auto_start_programs=`
+// (e.g. "telegram-desktop discord zen-browser" -> 3 tokens).
+std::vector<std::string> SplitWhitespace(
+    const std::string& value
 );
 
 // Byte offset of the start of the UTF-8 codepoint immediately before
