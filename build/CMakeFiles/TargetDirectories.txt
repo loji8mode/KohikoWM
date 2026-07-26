@@ -1,0 +1,2 @@
+/home/loji_mode/Documents/Kohiko/build/CMakeFiles/edit_cache.dir
+/home/loji_mode/Documents/Kohiko/build/CMakeFiles/rebuild_cache.dir
