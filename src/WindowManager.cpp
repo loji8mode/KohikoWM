@@ -67,6 +67,8 @@ void WindowManager::Initialize()
     m_notepad.Configure(m_config, m_monitors.Primary().Geometry());
     m_bar.SetNotepadActive(m_notepad.HasContent());
 
+    m_windowRules = LoadWindowRules(m_config);
+
     m_keyboard.Configure(m_config);
     m_mouse.Configure(m_config);
 
@@ -314,6 +316,69 @@ void WindowManager::HandleExpose(const XExposeEvent& event)
 void WindowManager::HandleClientMessage(const XClientMessageEvent& event)
 {
     m_tray.HandleClientMessage(event);
+
+    // The standard EWMH way an already-mapped client asks the WM for a
+    // state change - "please make me fullscreen" (flameshot's overlay,
+    // a video player's own fullscreen button/shortcut, a chat client's
+    // media viewer, ...) chief among the ones Kohiko understands.
+    // Message-format details straight from the spec: data.l[0] is the
+    // action (0 remove / 1 add / 2 toggle - the EWMH
+    // _NET_WM_STATE_REMOVE/ADD/TOGGLE constants, which aren't
+    // otherwise exposed as X11 atoms/macros), and data.l[1]/data.l[2]
+    // are up to two state atoms being changed at once; Kohiko only
+    // actually implements one state, so it's enough to check both
+    // slots for it and ignore anything else it doesn't recognise.
+    if (event.message_type != m_atoms.NET_WM_STATE)
+        return;
+
+    ManagedWindow* window = m_repository.Get(event.window);
+
+    if (!window)
+        return;
+
+    bool concernsFullscreen =
+        static_cast<Atom>(event.data.l[1]) == m_atoms.NET_WM_STATE_FULLSCREEN ||
+        static_cast<Atom>(event.data.l[2]) == m_atoms.NET_WM_STATE_FULLSCREEN;
+
+    if (!concernsFullscreen)
+        return;
+
+    WindowRuleEffect rules =
+        ResolveWindowRules(window->ClassName(), window->InstanceName(), window->Title());
+
+    if (rules.denyFullscreen)
+        return; // this class is configured to never be allowed real fullscreen
+
+    static constexpr long kNetWmStateRemove = 0;
+    static constexpr long kNetWmStateAdd    = 1;
+    static constexpr long kNetWmStateToggle = 2;
+
+    bool shouldBeFullscreen = window->IsFullscreen();
+
+    switch (event.data.l[0])
+    {
+        case kNetWmStateAdd:    shouldBeFullscreen = true;                    break;
+        case kNetWmStateRemove: shouldBeFullscreen = false;                   break;
+        case kNetWmStateToggle: shouldBeFullscreen = !window->IsFullscreen(); break;
+        default: return;
+    }
+
+    if (shouldBeFullscreen == window->IsFullscreen())
+        return;
+
+    if (shouldBeFullscreen)
+    {
+        window->SetPreviousState(window->State());
+        window->SetState(WindowState::Fullscreen);
+    }
+    else
+    {
+        window->SetState(window->PreviousState());
+    }
+
+    m_connection.SetNetWmState(m_atoms, window->Id(), shouldBeFullscreen);
+
+    Arrange();
 }
 
 bool WindowManager::HandleModalKeyPress(const XKeyEvent& event)
@@ -430,6 +495,7 @@ void WindowManager::BeginSwapDrag(ManagedWindow* window, const Point& cursor)
     m_dragCurrentRect = geometry;
 
     m_connection.Raise(window->Id());
+    RaiseModalWindows();
     m_cursor.SetDragging(true);
 }
 
@@ -619,11 +685,34 @@ void WindowManager::Manage(WindowID id)
     bool isTransient = m_connection.GetTransientFor(id, transientOwner);
     bool isDialog = m_connection.IsDialog(id, m_atoms);
 
-    if (isTransient || isDialog)
+    WindowRuleEffect rules = ResolveWindowRules(className, instanceName, window->Title());
+
+    // A `windowrule=workspace:N` match ("open Telegram's media viewer
+    // on its own dedicated workspace instead of cluttering whatever's
+    // current" is the motivating example) has to land before the
+    // tiling-capacity checks below, since which workspace this window
+    // even competes for room on depends on it.
+    if (rules.forceWorkspace >= 1 && rules.forceWorkspace <= m_workspaces.Count())
+        window->SetWorkspace(rules.forceWorkspace);
+
+    // `windowrule=tile` is an explicit "no matter what this
+    // application's own hints say, force it into the tiling layout"
+    // override - a Java/Swing launcher that insists on floating at its
+    // own fixed size (and fights the layout it's given) is the
+    // motivating example. It skips the transient/dialog auto-float
+    // path below entirely and falls straight through to the same
+    // TryTile() every ordinary window goes through - which, unlike a
+    // ConfigureRequest a client might send afterward asking to be its
+    // "own size" again, Kohiko simply never honours for a tiled window
+    // (see HandleConfigureRequest): once tiled, it stays exactly the
+    // size Kohiko's layout says, strictly, for good.
+    bool wantsFloat = !rules.forceTile && (rules.forceFloat || isTransient || isDialog);
+
+    if (wantsFloat)
     {
         window->SetState(WindowState::Floating);
 
-        Rect geometry = CenteredFloatingRect(0.5f, 0.5f);
+        Rect geometry = CenteredFloatingRectForWindow(id, attrs);
         window->SetGeometry(geometry);
         window->SetFloatingGeometry(geometry);
 
@@ -658,7 +747,7 @@ void WindowManager::Manage(WindowID id)
             // floating instead of forcing an undersized tile.
             window->SetState(WindowState::Floating);
 
-            Rect geometry = CenteredFloatingRect(0.5f, 0.5f);
+            Rect geometry = CenteredFloatingRectForWindow(id, attrs);
             window->SetGeometry(geometry);
             window->SetFloatingGeometry(geometry);
 
@@ -670,6 +759,29 @@ void WindowManager::Manage(WindowID id)
                 "below the configured minimum size - opened window " +
                 std::to_string(static_cast<unsigned long>(id)) + " floating instead.");
         }
+    }
+
+    // A client's own EWMH fullscreen request, made before it was ever
+    // mapped (some toolkits set _NET_WM_STATE directly instead of
+    // sending a ClientMessage, since the message form is only
+    // meaningful for an already-mapped window - see
+    // HandleClientMessage() for that path) and `windowrule=fullscreen`
+    // (flameshot's screenshot overlay - which needs to genuinely cover
+    // the whole screen to work at all, not open at some fraction of it
+    // - is the motivating example for both) mean the same thing here:
+    // this window should already be fullscreen the instant it appears,
+    // not tiled/floating-sized for one frame first. `nofullscreen`
+    // wins over both if a rule says this class should never be allowed
+    // real fullscreen at all.
+    bool wantsFullscreen =
+        !rules.denyFullscreen &&
+        (rules.forceFullscreen || m_connection.HasNetWmStateFullscreen(id, m_atoms));
+
+    if (wantsFullscreen)
+    {
+        window->SetPreviousState(window->State());
+        window->SetState(WindowState::Fullscreen);
+        m_connection.SetNetWmState(m_atoms, id, true);
     }
 
     // A window the fallback above redistributed onto a *different*
@@ -857,6 +969,14 @@ void WindowManager::Arrange()
     m_bar.SetScratchpadActive(m_scratchpad.HasWindow() && m_scratchpad.IsVisible());
     m_bar.SetNotepadActive(m_notepad.HasContent());
     m_bar.Redraw();
+
+    // Every Raise() above (a newly-mapped window, a floating window,
+    // a fullscreen window) happened *after* the Launcher/Notepad were
+    // last raised, which - left alone - would leave whichever one is
+    // currently open stacked underneath something else even though it
+    // still holds real input focus. Always give it the last word on
+    // stacking order.
+    RaiseModalWindows();
 
     m_connection.Flush();
 }
@@ -1083,6 +1203,7 @@ void WindowManager::ToggleScratchpadForFocused()
         m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
         m_connection.MapWindow(window->Id());
         m_connection.Raise(window->Id());
+        RaiseModalWindows();
 
         Focus(window->Id());
 
@@ -1156,6 +1277,8 @@ void WindowManager::ReloadConfig()
 
     m_keyboard.Configure(m_config);
     m_mouse.Configure(m_config);
+
+    m_windowRules = LoadWindowRules(m_config);
 
     m_fileManager =
         m_config.GetString(
@@ -1416,6 +1539,85 @@ Rect WindowManager::CenteredFloatingRect(float widthFraction, float heightFracti
     rect.y = monitor.y + (monitor.height - rect.height) / 2;
 
     return rect;
+}
+
+Rect WindowManager::CenteredFloatingRectForWindow(WindowID id, const XWindowAttributes& attrs)
+{
+    int width = 0;
+    int height = 0;
+
+    // Prefer what the client itself actually asked for - WM_NORMAL_HINTS
+    // where it set one, otherwise whatever size it already had when it
+    // asked to be mapped (every toolkit creates its top-level window at
+    // its real intended size before mapping it; attrs is read at that
+    // exact moment by Manage()). A fixed-size dialog, an image viewer
+    // sized to the picture it's showing, a settings window with a
+    // sensible default size - all of them should open at *that* size,
+    // centered, instead of being squashed or stretched into a flat 50%
+    // of the screen regardless of what they actually contain.
+    if (!m_connection.GetPreferredSize(id, width, height))
+    {
+        width = attrs.width;
+        height = attrs.height;
+    }
+
+    // A handful of windows genuinely don't have any usable size to go
+    // on (0, or something too small to be more than a sliver) - rather
+    // than ever placing an unusable window, fall back to the old
+    // half-the-screen default exactly like before this existed.
+    if (width < 50 || height < 30)
+        return CenteredFloatingRect(0.5f, 0.5f);
+
+    const Rect& monitor = m_monitors.Primary().Geometry();
+
+    // Never let a window's own idea of its size push it off-screen -
+    // still centered, just clamped to comfortably fit.
+    int maxWidth  = static_cast<int>(static_cast<float>(monitor.width)  * 0.95f);
+    int maxHeight = static_cast<int>(static_cast<float>(monitor.height) * 0.95f);
+
+    if (width  > maxWidth)  width  = maxWidth;
+    if (height > maxHeight) height = maxHeight;
+
+    Rect rect;
+    rect.width  = width;
+    rect.height = height;
+    rect.x = monitor.x + (monitor.width  - width)  / 2;
+    rect.y = monitor.y + (monitor.height - height) / 2;
+
+    return rect;
+}
+
+WindowRuleEffect WindowManager::ResolveWindowRules(
+    const std::string& className,
+    const std::string& instanceName,
+    const std::string& title) const
+{
+    WindowRuleEffect effect;
+
+    for (const WindowRule& rule : m_windowRules)
+    {
+        if (!rule.Matches(className, instanceName, title))
+            continue;
+
+        switch (rule.action)
+        {
+            case WindowRule::Action::Float:       effect.forceFloat      = true;          break;
+            case WindowRule::Action::Tile:        effect.forceTile       = true;          break;
+            case WindowRule::Action::Fullscreen:  effect.forceFullscreen = true;           break;
+            case WindowRule::Action::NoFullscreen: effect.denyFullscreen  = true;          break;
+            case WindowRule::Action::Workspace:   effect.forceWorkspace  = rule.workspace; break;
+        }
+    }
+
+    return effect;
+}
+
+void WindowManager::RaiseModalWindows()
+{
+    if (m_launcher.IsOpen())
+        m_connection.Raise(m_launcher.WindowId());
+    else if (m_notepad.IsOpen())
+        m_connection.Raise(m_notepad.WindowId());
 }
 
 unsigned long WindowManager::ParseColor(const std::string& key, const std::string& fallback) const

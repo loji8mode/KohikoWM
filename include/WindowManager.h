@@ -15,12 +15,14 @@
 #include "SystemTray.h"
 #include "Types.h"
 #include "WindowRepository.h"
+#include "WindowRule.h"
 #include "WorkspaceManager.h"
 #include "XAtoms.h"
 
 #include <X11/Xlib.h>
 
 #include <string>
+#include <vector>
 
 namespace Kohiko
 {
@@ -206,7 +208,36 @@ private:
     void RefreshClientList();
 
     Rect CenteredFloatingRect(float widthFraction, float heightFraction);
+
+    // What a floating window (a transient/dialog, a `windowrule=float`
+    // match, or the "no workspace has room" fallback) should actually
+    // be sized to: the client's own requested size where it gave one
+    // (WM_NORMAL_HINTS, else its current on-screen size at map time),
+    // clamped to comfortably fit the monitor and centered - never the
+    // flat 50%-of-the-screen guess CenteredFloatingRect(0.5, 0.5)
+    // makes on its own. Falls back to that same 50/50 guess only when
+    // the client's own idea of its size is missing or unusably small.
+    Rect CenteredFloatingRectForWindow(WindowID id, const XWindowAttributes& attrs);
+
     unsigned long ParseColor(const std::string& key, const std::string& fallback) const;
+
+    // Every `windowrule=` line whose selector matches this window,
+    // collapsed into one effect - see WindowRule.h.
+    WindowRuleEffect ResolveWindowRules(
+        const std::string& className,
+        const std::string& instanceName,
+        const std::string& title) const;
+
+    // Re-raises the Launcher/Notepad above whatever Arrange() (or a
+    // manual Raise() elsewhere, e.g. the Scratchpad or a Swap drag)
+    // just put on top of it. Without this, a window that opens - or
+    // any window that goes floating/fullscreen/dragged - while either
+    // is up would silently end up stacked *above* it, even though
+    // input focus (and the ability to type into it) correctly stayed
+    // on the modal the entire time; the two falling out of sync like
+    // that is exactly what made it look "stuck behind" the new window.
+    // A no-op when neither is open.
+    void RaiseModalWindows();
 
     std::string DumpClientsJson() const;
     std::string DumpMonitorsJson() const;
@@ -220,6 +251,10 @@ private:
 
     XAtoms m_atoms;
     CursorManager m_cursor;
+
+    // Loaded from every `windowrule=` line in the config, refreshed by
+    // both Initialize() and ReloadConfig() - see WindowRule.h.
+    std::vector<WindowRule> m_windowRules;
 
     // The invisible window WindowManager::Initialize() creates via
     // XConnection::InitializeEwmhSupport() to advertise EWMH support -

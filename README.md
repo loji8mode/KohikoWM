@@ -27,6 +27,7 @@ a full compositor.
 - [Building](#building)
 - [Running it](#running-it)
 - [Configuration](#configuration)
+- [Window rules](#window-rules)
 - [Autostart](#autostart)
 - [Keyboard layouts / languages](#keyboard-layouts--languages)
 - [Default keybindings](#default-keybindings)
@@ -124,10 +125,11 @@ cp config/default.conf ~/.config/kohiko/kohiko.conf
 ## Configuration
 
 The format is deliberately simple: `key=value`, one per line, `#` for
-comments. Two kinds of key are allowed to repeat (`bind=` and
-`exec.<name>=`); every other key is a single setting where the last
-occurrence wins. See [`config/default.conf`](config/default.conf) for the
-full annotated set - the highlights:
+comments. Three kinds of key are allowed to repeat (`bind=`, `exec.<name>=`,
+and `windowrule=` - see [Window rules](#window-rules)); every other key is
+a single setting where the last occurrence wins. See
+[`config/default.conf`](config/default.conf) for the full annotated set -
+the highlights:
 
 ```ini
 general.inner_gap=6              # gap between tiled windows
@@ -161,12 +163,66 @@ mouse.resize=SUPER+BTN3
 
 bind=SUPER+RETURN exec terminal
 bind=SUPER+Q close
+
+windowrule=fullscreen class:flameshot   # see Window rules below
+windowrule=tile class:tlauncher
 ```
 
 Reload after editing without restarting: `kohikoctl reload` (also bound to
 `Super+Shift+C` by default). `auto_start_programs` is the one exception -
 it only ever runs right after Kohiko itself starts, never on reload, so
 reloading the config doesn't relaunch every autostart program.
+
+## Window rules
+
+No amount of automatic window-type detection can guess every
+application's intentions correctly, so - the same as i3's `for_window` or
+Hyprland's `windowrule` - Kohiko lets you pin down exactly how a specific
+application behaves, overriding whatever it asks for itself:
+
+```ini
+windowrule=float class:pavucontrol
+windowrule=tile class:tlauncher
+windowrule=fullscreen class:flameshot
+windowrule=nofullscreen class:mpv
+windowrule=workspace:4 class:telegram title:photo
+```
+
+- `float` - always open floating (centered, sized to its own natural
+  size - see below), never tiled, regardless of window type.
+- `tile` - always tile it, strictly, even if it's the kind of window
+  (a dialog, or one that insists on opening at its own fixed size -
+  Tlauncher is the canonical example of a Java/Swing app that does this
+  and fights being resized) Kohiko would otherwise float automatically.
+- `fullscreen` - open already fullscreen. flameshot's screenshot overlay
+  needs this to work at all (a partial-screen overlay can't select the
+  rest of the screen); it already asks for real EWMH fullscreen on its
+  own and Kohiko honours that automatically the moment it's mapped (see
+  [EWMH support](#ewmh-support)), so this mostly exists as an explicit
+  belt-and-suspenders pin, or for apps that don't ask for it themselves.
+- `nofullscreen` - never allow real fullscreen for this app, whether it
+  asks for it itself or `fullscreen`/`Super+F` asks on its behalf; it
+  stays tiled/floating instead.
+- `workspace:N` - always open on workspace N regardless of whichever
+  workspace is current - e.g. exiling a chat app's media-viewer windows
+  to their own workspace ("a new virtual display") instead of covering
+  whatever you're doing on the current one.
+
+The selector after the action is one or more of `class:`, `instance:`,
+`title:` (case-insensitive substring match against `WM_CLASS`'s
+class/instance and the window title, space-separated - a window has to
+match every one given to match the rule at all). `xprop` (click the
+window after running it) shows you the actual class/instance/title to
+match on if you're not sure.
+
+Every window still gets sensible behaviour with **no** rule at all:
+transient/dialog windows float automatically, and any floating window -
+automatic or `float` above - opens centered at whatever size it actually
+asked for (its `WM_NORMAL_HINTS`, or failing that its own size at the
+moment it asked to be mapped) rather than a flat fraction of the screen,
+so it doesn't get squashed or stretched into a size it was never designed
+for. `windowrule=` exists for the apps that don't play along with that on
+their own.
 
 ## Autostart
 
@@ -257,10 +313,21 @@ lifetime of the session:
 windows for their title (shown in the bar), and sets it on its own
 check window for the round-trip above.
 
+Kohiko also implements the one EWMH window *state* it needs to:
+`_NET_WM_STATE_FULLSCREEN`. A client can ask for it either of the two
+ways the spec allows - a `_NET_WM_STATE` `ClientMessage` (add/remove/
+toggle) once it's already mapped, or setting the property directly
+before it's ever mapped at all (the form some toolkits use instead,
+since the `ClientMessage` form is only meaningful for an already-mapped
+window) - and Kohiko honours both, updating the property back to match
+reality either way. `windowrule=fullscreen`/`nofullscreen` (see
+[Window rules](#window-rules)) sit on top of this same mechanism.
+
 This is what lets EWMH-aware tools that check for a compliant window
 manager before trusting anything - flameshot's screenshot overlay is
 the motivating example - work correctly under Kohiko instead of falling
-back to less reliable window discovery.
+back to less reliable window discovery, *and* actually receive the real
+fullscreen they ask for once they do.
 
 ## The mouse: swap and resize
 
@@ -306,6 +373,13 @@ external launcher binary required. If you'd rather use dmenu, rofi, or
 similar instead, the general `exec.<name>=` + `bind=... exec <name>`
 mechanism is still there for it; see the commented-out example in
 `config/default.conf`.
+
+It also stays raised above everything else for as long as it's open -
+including a program that opens *while* it's up. The launcher deliberately
+never uses an `XGrabKeyboard` (see its own header comment for why), so it
+depends entirely on actually holding X input focus, on top, to be usable
+at all; Kohiko re-raises it after every single window-stacking change for
+exactly that reason, the same way `Super+N`'s notepad below does.
 
 The application list (from `/usr/share/applications/*.desktop`) and the
 file index (from `$HOME`) are both cached in memory rather than
@@ -410,7 +484,8 @@ Roughly the file layout the project was designed around, one responsibility each
 | `WorkspaceManager` / `Workspace` | Which workspace is current/previous |
 | `WindowRepository`         | `WindowID -> ManagedWindow*`, plus the `Focused()/Floating()/Scratchpad()/Visible()` filters |
 | `ManagedWindow`            | Everything Kohiko knows about one window |
-| `Config` / `ConfigParser`  | The `key=value` file, with repeatable keys for `bind=`/`exec.*=` |
+| `Config` / `ConfigParser`  | The `key=value` file, with repeatable keys for `bind=`/`exec.*=`/`windowrule=` |
+| `WindowRule`                | Parses/matches `windowrule=` lines - see [Window rules](#window-rules) |
 | `IPCServer` / `kohikoctl`  | The Unix-socket control protocol and its CLI client |
 | `Bar`                      | Workspaces, active title, scratchpad/notepad indicators, clock - plain Xlib text, no toolkit |
 | `MonitorManager` / `Monitor` | XRandr geometry when available, one-monitor fallback otherwise |

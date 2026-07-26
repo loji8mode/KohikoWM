@@ -335,6 +335,84 @@ void XConnection::SetActiveWindow(const XAtoms& atoms, ::Window window)
         reinterpret_cast<unsigned char*>(&window), 1);
 }
 
+bool XConnection::HasNetWmStateFullscreen(::Window window, const XAtoms& atoms)
+{
+    Atom actualType;
+    int actualFormat = 0;
+    unsigned long itemCount = 0;
+    unsigned long bytesLeft = 0;
+    unsigned char* data = nullptr;
+
+    bool fullscreen = false;
+
+    if (XGetWindowProperty(
+            m_display, window, atoms.NET_WM_STATE, 0, 16, False,
+            XA_ATOM, &actualType, &actualFormat, &itemCount, &bytesLeft, &data
+        ) == Success && data)
+    {
+        Atom* states = reinterpret_cast<Atom*>(data);
+
+        for (unsigned long i = 0; i < itemCount; ++i)
+        {
+            if (states[i] == atoms.NET_WM_STATE_FULLSCREEN)
+            {
+                fullscreen = true;
+                break;
+            }
+        }
+
+        XFree(data);
+    }
+
+    return fullscreen;
+}
+
+void XConnection::SetNetWmState(const XAtoms& atoms, ::Window window, bool fullscreen)
+{
+    // Kohiko only ever tracks one EWMH state itself (fullscreen), so
+    // this is a plain replace rather than a read-modify-write against
+    // whatever else a client might have listed there - matching the
+    // same "here's exactly what we implement" scope as the rest of
+    // Kohiko's EWMH support (see InitializeEwmhSupport()).
+    if (fullscreen)
+    {
+        Atom value = atoms.NET_WM_STATE_FULLSCREEN;
+
+        XChangeProperty(
+            m_display, window, atoms.NET_WM_STATE, XA_ATOM, 32,
+            PropModeReplace, reinterpret_cast<unsigned char*>(&value), 1);
+    }
+    else
+    {
+        XDeleteProperty(m_display, window, atoms.NET_WM_STATE);
+    }
+}
+
+bool XConnection::GetPreferredSize(::Window window, int& width, int& height)
+{
+    XSizeHints hints{};
+    long suppliedMask = 0;
+
+    if (!XGetWMNormalHints(m_display, window, &hints, &suppliedMask))
+        return false;
+
+    if ((hints.flags & (PSize | USSize)) && hints.width > 0 && hints.height > 0)
+    {
+        width = hints.width;
+        height = hints.height;
+        return true;
+    }
+
+    if ((hints.flags & PBaseSize) && hints.base_width > 0 && hints.base_height > 0)
+    {
+        width = hints.base_width;
+        height = hints.base_height;
+        return true;
+    }
+
+    return false;
+}
+
 void XConnection::GrabKey(unsigned int keycode, unsigned int modifiers)
 {
     XGrabKey(

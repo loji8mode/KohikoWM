@@ -112,6 +112,33 @@ public:
     // just closed).
     void SetActiveWindow(const XAtoms& atoms, ::Window window);
 
+    // True if `window` already carries _NET_WM_STATE_FULLSCREEN in its
+    // _NET_WM_STATE property. Some toolkits set this directly (via
+    // XChangeProperty) before ever mapping the window, rather than
+    // sending a ClientMessage - the ClientMessage form of this request
+    // is only meaningful for an already-mapped window, per the EWMH
+    // spec, so a pre-map fullscreen request has to be read back this
+    // way instead. WindowManager::Manage() checks this once, at map
+    // time; WindowManager::HandleClientMessage() handles the
+    // after-map ClientMessage form.
+    bool HasNetWmStateFullscreen(::Window window, const XAtoms& atoms);
+
+    // Keeps the window's own _NET_WM_STATE property honest after
+    // Kohiko changes its fullscreen state (whether that came from the
+    // client's own request, `windowrule=fullscreen`, or Super+F) - a
+    // handful of apps re-check this after asking, and every one of
+    // them is entitled to see it reflect reality either way.
+    void SetNetWmState(const XAtoms& atoms, ::Window window, bool fullscreen);
+
+    // The size a client itself would prefer, read from WM_NORMAL_HINTS
+    // (PSize/USize, falling back to PBaseSize) - what a floating
+    // window should actually be sized to instead of an arbitrary
+    // fraction of the screen. Returns false (leaving width/height
+    // untouched) if the client never specified a preferred size at
+    // all, which callers should treat as "fall back to the window's
+    // current/default size instead".
+    bool GetPreferredSize(::Window window, int& width, int& height);
+
     // --- grabs -----------------------------------------------------------
 
     // Global grabs on the root window (keybinds, Super+drag).
