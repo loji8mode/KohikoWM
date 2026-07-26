@@ -34,18 +34,24 @@ a full compositor.
 - [The mouse: swap and resize](#the-mouse-swap-and-resize)
 - [The launcher (Super+D)](#the-launcher-superd)
 - [The notepad (Super+N)](#the-notepad-supern)
+- [Fonts and languages](#fonts-and-languages)
 - [kohikoctl / IPC](#kohikoctl--ipc)
 - [Architecture](#architecture)
 - [Known limitations](#known-limitations)
 
 ## Building
 
-You need a C++20 compiler and the X11 development headers. Everything
-else (gaps, borders, the bar) is plain Xlib - there's no GTK, Qt, Xft, or
-compositor dependency of any kind.
+You need a C++20 compiler and the X11 development headers, plus GTK3 and
+Imlib2 (icon-theme lookup and icon rendering for the launcher - see
+`scripts/install-arch.sh`'s dependency comments for exactly where each one
+is used) and Xft/fontconfig (text rendering - see
+[Fonts and languages](#fonts-and-languages)). There's no Qt or compositor
+dependency of any kind, and no toolkit is used for the bar/launcher/
+notepad's own UI - just plain Xlib shapes plus Xft text.
 
 ```sh
-sudo apt install build-essential libx11-dev        # Debian/Ubuntu
+sudo apt install build-essential libx11-dev libgtk-3-dev libimlib2-dev \
+                  libxft-dev libfontconfig-dev fonts-dejavu-core
 # optional, for multi-monitor geometry:
 sudo apt install libxrandr-dev
 ```
@@ -319,9 +325,9 @@ the way out) without closing or discarding anything.
 
 The bar shows a `[N]` indicator whenever the notepad has any saved content
 or is currently open - a bracketed-letter indicator in the same style as
-the scratchpad's `[S]`, rather than an actual icon glyph, since Kohiko's
-bar only ever draws with a plain X11 core font and those don't carry emoji
-glyphs to draw with.
+the scratchpad's `[S]`, rather than an actual emoji glyph, since relying on
+one specific emoji being installed (and rendering as more than a
+missing-glyph box) is fragile in a way a plain letter never is.
 
 Deliberately, this is *not* "spawn a text editor into a hidden special
 workspace and toggle it," which is the common pattern in the Hyprland
@@ -330,6 +336,38 @@ widget with its own tiny text buffer, again with no toolkit or external
 process involved. The trade-off is a correspondingly small feature set: no
 undo, no selection, no copy/paste - it's meant for jotting something down,
 not replacing a real editor.
+
+## Fonts and languages
+
+The bar, launcher, and notepad all draw their own text through Xft/
+fontconfig (`include/Font.h`), the one dependency this project takes on
+beyond plain libX11 - not for decoration, but because classic X11 core
+fonts (the old `XCreateFontSet`/`Xutf8DrawString` approach this replaced)
+essentially never have real glyph coverage for anything beyond Latin text
+on a modern system, which meant Cyrillic, CJK, and most other scripts
+silently rendered as missing-glyph boxes no matter what font name was
+requested.
+
+`general.font=` names one font, as a fontconfig pattern - not an XLFD name:
+
+```ini
+general.font=monospace:pixelsize=14
+```
+
+That font only has to cover whatever script *you* mostly type in - any
+character it doesn't have (Ukrainian on a Latin-only font, Chinese on
+almost any font, ...) is automatically looked up against every other font
+installed on the system and drawn with whichever one actually has that
+glyph, the same per-character fallback technique dwm's own Xft patch uses.
+There's nothing to configure per-language: install a font that covers the
+script you need (e.g. `noto-fonts-cjk` on Arch, `fonts-noto-cjk` on
+Debian/Ubuntu, for Chinese/Japanese/Korean) and it's picked up automatically
+the next time Kohiko starts.
+
+If a codepoint genuinely isn't covered by any installed font, it still
+falls back to drawing with `general.font=`'s own font, which typically
+means a missing-glyph "tofu" box - that's a "no such font is installed"
+problem, not something Kohiko's fallback logic can work around further.
 
 ## kohikoctl / IPC
 

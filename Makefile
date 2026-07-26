@@ -1,15 +1,18 @@
 # Plain-make alternative to CMakeLists.txt - no cmake required, just
-# g++ and libX11 (and optionally libXrandr for multi-monitor support,
-# auto-detected below).
+# g++, libX11, and libXft/fontconfig (used for the bar/launcher/
+# notepad's text rendering - see include/Font.h), plus optionally
+# libXrandr for multi-monitor support (auto-detected below).
 
 CXX      ?= g++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra
 
 INCLUDES := -Iinclude
 INCLUDES += $(shell pkg-config --cflags gtk+-3.0)
+INCLUDES += $(shell pkg-config --cflags xft fontconfig)
 
 LIBS := -lX11 -lImlib2
 LIBS += $(shell pkg-config --libs gtk+-3.0)
+LIBS += $(shell pkg-config --libs xft fontconfig)
 
 SRC := $(wildcard src/*.cpp)
 OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC))

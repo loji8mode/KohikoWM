@@ -11,13 +11,20 @@ endif()
 
 find_package(X11 REQUIRED)
 
+# Xft/fontconfig - used by Font.cpp for the bar/launcher/notepad's
+# text rendering (see include/Font.h for why plain libX11 alone isn't
+# enough for that). Neither has an upstream CMake find-module, so this
+# goes through pkg-config the same way the Makefile does.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(Xft REQUIRED IMPORTED_TARGET xft fontconfig)
+
 # --- kohiko: the window manager ------------------------------------------------
 
 file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 
 add_executable(kohiko ${KOHIKO_SOURCES})
 target_include_directories(kohiko PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
-target_link_libraries(kohiko PRIVATE ${X11_LIBRARIES})
+target_link_libraries(kohiko PRIVATE ${X11_LIBRARIES} PkgConfig::Xft)
 target_compile_options(kohiko PRIVATE -Wall -Wextra)
 
 # Multi-monitor geometry via XRandr, enabled only if it's actually

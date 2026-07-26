@@ -217,8 +217,10 @@ Launcher::~Launcher()
     if (m_xim)
         XCloseIM(m_xim);
 
-    if (m_fontSet)
-        XFreeFontSet(display, m_fontSet);
+    if (m_xftDraw)
+        XftDrawDestroy(m_xftDraw);
+
+    m_font.Unload();
 
     if (m_gc)
         XFreeGC(display, m_gc);
@@ -290,33 +292,16 @@ void Launcher::Configure(
 
         m_gc = XCreateGC(display, m_window, 0, nullptr);
 
-        char** missing = nullptr;
-int nmissing = 0;
-char* def = nullptr;
+        m_font.Load(
+            display,
+            screen,
+            config.GetString("general.font", "monospace:pixelsize=14"));
 
-// XCreateFontSet takes classic comma-separated XLFD base font
-// names, not fontconfig pattern syntax - "monospace:size=13" is
-// fontconfig-only syntax and never matches an XLFD font, which is
-// why m_fontSet stayed null and no text ever drew. "fixed" is the
-// XLFD alias every X11 install ships (it's xterm's own default
-// font), so it's included in both lists as a guaranteed-to-match
-// fallback.
-m_fontSet = XCreateFontSet(
-    display,
-    "-*-fixed-medium-r-normal--13-*-*-*-*-*-*-*,-*-*-medium-r-normal--13-*-*-*-*-*-*-*,fixed",
-    &missing,
-    &nmissing,
-    &def);
-
-if (!m_fontSet)
-{
-    m_fontSet = XCreateFontSet(
-        display,
-        "-*-helvetica-medium-r-normal--12-*-*-*-*-*-*-*,-*-*-medium-r-normal--12-*-*-*-*-*-*-*,fixed",
-        &missing,
-        &nmissing,
-        &def);
-}
+        m_xftDraw = XftDrawCreate(
+            display,
+            m_window,
+            DefaultVisual(display, screen),
+            DefaultColormap(display, screen));
 
         // Xutf8LookupString (used in HandleKeyPress below) needs an
         // actual input method + input context - without this m_xic
@@ -672,251 +657,202 @@ void Launcher::Redraw()
 
     Display* display = m_connection.GetDisplay();
 
-    
-
     XClearWindow(display, m_window);
 
     int padding = 16;
     int fontHeight = 18;
     int baseline = padding + fontHeight;
 
+    Visual* visual = DefaultVisual(display, m_connection.Screen());
+    Colormap colormap = DefaultColormap(display, m_connection.Screen());
 
     if (m_query.empty())
-{
-    static const std::string placeholder =
-        "Type a command and press Enter...";
+    {
+        static const std::string placeholder =
+            "Type a command and press Enter...";
+
+        if (m_xftDraw)
+        {
+            TextColor color(display, visual, colormap, m_placeholderPixel);
+            m_font.DrawString(m_xftDraw, padding, baseline, placeholder, color.Get());
+        }
+    }
+    else
+    {
+        std::string visible = m_query;
+
+        if (m_caretOn)
+            visible.insert(
+                visible.begin() +
+                static_cast<long>(m_cursor),
+                '|');
+
+        if (m_xftDraw)
+        {
+            TextColor color(display, visual, colormap, m_foregroundPixel);
+            m_font.DrawString(m_xftDraw, padding, baseline, visible, color.Get());
+        }
+    }
 
     XSetForeground(
         display,
         m_gc,
         m_placeholderPixel);
 
-    // XCreateFontSet can legitimately return null (e.g. no XLFD font
-    // matches the requested charsets on this X server) - Xutf8DrawString
-    // requires a real fontset, so skip drawing rather than passing it null.
-    if (m_fontSet)
-    {
-        Xutf8DrawString(
-            display,
-            m_window,
-            m_fontSet,
-            m_gc,
-            padding,
-            baseline,
-            placeholder.c_str(),
-            static_cast<int>(placeholder.size()));
-    }
-}
-else
-{
-    std::string visible = m_query;
-
-    if (m_caretOn)
-        visible.insert(
-            visible.begin() +
-            static_cast<long>(m_cursor),
-            '|');
-
-    XSetForeground(
+    XDrawLine(
         display,
+        m_window,
         m_gc,
-        m_foregroundPixel);
-
-    if (m_fontSet)
-    {
-        Xutf8DrawString(
-            display,
-            m_window,
-            m_fontSet,
-            m_gc,
-            padding,
-            baseline,
-            visible.c_str(),
-            static_cast<int>(visible.size()));
-    }
-}
-
-    std::string visible = m_query;
-
-    if (m_caretOn)
-        visible.insert(visible.begin() + static_cast<long>(m_cursor), '|');
-
-    XSetForeground(display, m_gc, m_foregroundPixel);
-
-    if (m_fontSet)
-    {
-        Xutf8DrawString(
-            display, m_window, m_fontSet, m_gc,
-            padding, baseline,
-            visible.c_str(), static_cast<int>(visible.size()));
-    }
-
-        XSetForeground(
-    display,
-    m_gc,
-    m_placeholderPixel);
-
-XDrawLine(
-    display,
-    m_window,
-    m_gc,
-    padding,
-    baseline + 15,
-    m_geometry.width - padding,
-    baseline + 15);
+        padding,
+        baseline + 15,
+        m_geometry.width - padding,
+        baseline + 15);
 
     int y = baseline + 40;
     int lineHeight = 20;
     int bottomPadding = -100;
 
-int visibleRows =
-    (m_geometry.height - y - bottomPadding)
-    / lineHeight;
+    int visibleRows =
+        (m_geometry.height - y - bottomPadding)
+        / lineHeight;
 
     std::size_t lastVisibleIndex =
-    std::min(
-        m_matches.size(),
-        m_scrollOffset +
-        static_cast<std::size_t>(visibleRows));
+        std::min(
+            m_matches.size(),
+            m_scrollOffset +
+            static_cast<std::size_t>(visibleRows));
 
-for (std::size_t i = m_scrollOffset;
-     i < lastVisibleIndex;
-     ++i)
-{
-    int drawY =
-    y +
-    static_cast<int>(i - m_scrollOffset)
-    * lineHeight;
-    if (i == m_selectedIndex)
-{
-    XSetForeground(display, m_gc, m_borderPixel);
-
-    XFillRectangle(
-        display,
-        m_window,
-        m_gc,
-        8,
-        drawY - 14,
-        m_geometry.width - 16,
-        20);
-
-    XSetForeground(
-        display,
-        m_gc,
-        m_backgroundPixel);
-}
-else
-{
-    XSetForeground(display, m_gc, m_foregroundPixel);
-}
-
-    
-
-    const auto& match =
-    m_matches[i];
-
-    std::string label;
-
-if (match.type ==
-    MatchType::Application)
-{
-    label = m_entries[match.index].name;
-}
-else
-{
-    label =
-        m_files[match.index].name;
-}
-
-    if (match.type ==
-    MatchType::Application)
-{
-    const auto& app =
-        m_entries[match.index];
-
-    if (app.iconPixmap)
+    for (std::size_t i = m_scrollOffset;
+         i < lastVisibleIndex;
+         ++i)
     {
-        int iconX = 12;
-        int iconY = drawY - 14;
+        int drawY =
+            y +
+            static_cast<int>(i - m_scrollOffset)
+            * lineHeight;
 
-        if (app.iconMask)
+        // Selected rows draw their label in the background colour
+        // (for contrast against the highlight rectangle below) - the
+        // old code achieved this by setting the GC's foreground and
+        // letting Xutf8DrawString read it back; Xft takes an explicit
+        // XftColor per call instead, so that same choice is now
+        // captured here and threaded through to the draw call below.
+        unsigned long textPixel = m_foregroundPixel;
+
+        if (i == m_selectedIndex)
         {
-            XSetClipMask(display, m_gc, app.iconMask);
-            XSetClipOrigin(display, m_gc, iconX, iconY);
+            XSetForeground(display, m_gc, m_borderPixel);
+
+            XFillRectangle(
+                display,
+                m_window,
+                m_gc,
+                8,
+                drawY - 14,
+                m_geometry.width - 16,
+                20);
+
+            textPixel = m_backgroundPixel;
         }
 
-        XCopyArea(
-            display,
-            app.iconPixmap,
-            m_window,
-            m_gc,
-            0,
-            0,
-            20,
-            20,
-            iconX,
-            iconY);
+        const auto& match =
+            m_matches[i];
 
-        if (app.iconMask)
-            XSetClipMask(display, m_gc, None);
-    }
-}
-else
-{
-    Pixmap fileTypeIcon =
-        m_files[match.index].isDirectory ?
-        m_folderIconPixmap :
-        m_fileIconPixmap;
+        std::string label;
 
-    Pixmap fileTypeMask =
-        m_files[match.index].isDirectory ?
-        m_folderIconMask :
-        m_fileIconMask;
-
-    if (fileTypeIcon)
-    {
-        int iconX = 12;
-        int iconY = drawY - 14;
-
-        if (fileTypeMask)
+        if (match.type ==
+            MatchType::Application)
         {
-            XSetClipMask(display, m_gc, fileTypeMask);
-            XSetClipOrigin(display, m_gc, iconX, iconY);
+            label = m_entries[match.index].name;
+        }
+        else
+        {
+            label =
+                m_files[match.index].name;
         }
 
-        XCopyArea(
-            display,
-            fileTypeIcon,
-            m_window,
-            m_gc,
-            0,
-            0,
-            20,
-            20,
-            iconX,
-            iconY);
+        if (match.type ==
+            MatchType::Application)
+        {
+            const auto& app =
+                m_entries[match.index];
 
-        if (fileTypeMask)
-            XSetClipMask(display, m_gc, None);
+            if (app.iconPixmap)
+            {
+                int iconX = 12;
+                int iconY = drawY - 14;
+
+                if (app.iconMask)
+                {
+                    XSetClipMask(display, m_gc, app.iconMask);
+                    XSetClipOrigin(display, m_gc, iconX, iconY);
+                }
+
+                XCopyArea(
+                    display,
+                    app.iconPixmap,
+                    m_window,
+                    m_gc,
+                    0,
+                    0,
+                    20,
+                    20,
+                    iconX,
+                    iconY);
+
+                if (app.iconMask)
+                    XSetClipMask(display, m_gc, None);
+            }
+        }
+        else
+        {
+            Pixmap fileTypeIcon =
+                m_files[match.index].isDirectory ?
+                m_folderIconPixmap :
+                m_fileIconPixmap;
+
+            Pixmap fileTypeMask =
+                m_files[match.index].isDirectory ?
+                m_folderIconMask :
+                m_fileIconMask;
+
+            if (fileTypeIcon)
+            {
+                int iconX = 12;
+                int iconY = drawY - 14;
+
+                if (fileTypeMask)
+                {
+                    XSetClipMask(display, m_gc, fileTypeMask);
+                    XSetClipOrigin(display, m_gc, iconX, iconY);
+                }
+
+                XCopyArea(
+                    display,
+                    fileTypeIcon,
+                    m_window,
+                    m_gc,
+                    0,
+                    0,
+                    20,
+                    20,
+                    iconX,
+                    iconY);
+
+                if (fileTypeMask)
+                    XSetClipMask(display, m_gc, None);
+            }
+        }
+
+        if (m_xftDraw)
+        {
+            TextColor color(display, visual, colormap, textPixel);
+            m_font.DrawString(m_xftDraw, padding + 28, drawY, label, color.Get());
+        }
     }
-}
 
-    if (m_fontSet)
-    {
-        Xutf8DrawString(
-            display,
-            m_window,
-            m_fontSet,
-            m_gc,
-            padding + 28,
-            drawY,
-            label.c_str(),
-            static_cast<int>(label.size()));
-    }
+    XFlush(display);
 }
-XFlush(display);
-}
-
 void Launcher::LoadDesktopEntries()
 {
     namespace fs = std::filesystem;

@@ -35,7 +35,15 @@ echo "==> Installing dependencies (pacman)"
 # libxrandr       - optional multi-monitor support, auto-detected by the Makefile
 # imlib2          - icon loading (Launcher/Notepad)
 # gtk3            - icon-theme lookup only (GtkIconTheme in Launcher.cpp)
-# xorg-fonts-misc - the "fixed" core X font Bar/Launcher/Notepad fall back to
+# libxft          - text rendering with automatic per-glyph font fallback
+#                   across whatever's installed (see include/Font.h) - this
+#                   is what lets Bar/Launcher/Notepad render languages the
+#                   currently-configured `general.font=` doesn't itself
+#                   cover (Cyrillic, CJK, ...), not just English
+# ttf-dejavu      - a base font with solid Latin/Cyrillic/Greek coverage, so
+#                   there's at least *something* for Xft to load out of the
+#                   box - for CJK glyphs too, also install e.g. noto-fonts-cjk
+#                   (a large package, so not pulled in automatically here)
 # xorg-server     - to have an X server to run a window manager under at all
 # flameshot       - default.conf's exec.screenshot, bound to Print - swap the
 #                   package here too if you point exec.screenshot at something else
@@ -45,7 +53,8 @@ sudo pacman -S --needed --noconfirm \
     libxrandr \
     imlib2 \
     gtk3 \
-    xorg-fonts-misc \
+    libxft \
+    ttf-dejavu \
     xorg-server \
     flameshot
 

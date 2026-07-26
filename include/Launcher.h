@@ -2,6 +2,7 @@
 
 #include <filesystem>
 
+#include "Font.h"
 #include "Types.h"
 
 #include <X11/Xlib.h>
@@ -32,8 +33,9 @@ enum class LauncherResult
 // `exec.launcher=dmenu_run` default: a small centered input box that
 // "instantly opens, cursor already in the input field, type, Enter,
 // program starts, launcher closes" - no results list, no external
-// process, no toolkit. Rendered the same way as Bar (plain core-Xlib
-// text) for the same "own bar, no toolkit" reason.
+// process, no toolkit. Rendered the same way as Bar: plain Xlib
+// shapes plus Xft text (see Font.h), for the same "own bar, no
+// toolkit" reason.
 //
 // Deliberately never uses an active keyboard grab (XGrabKeyboard) -
 // WindowManager just gives it ordinary X input focus and, while it's
@@ -143,7 +145,8 @@ private:
 
     ::Window m_window = 0;
     GC m_gc = nullptr;
-    XFontSet m_fontSet = nullptr;
+    Font m_font;
+    XftDraw* m_xftDraw = nullptr;
 
     XIM m_xim = nullptr;
     XIC m_xic = nullptr;

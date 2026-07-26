@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Font.h"
 #include "Types.h"
 
 #include <X11/Xlib.h>
@@ -14,11 +15,11 @@ class Config;
 class SystemTray;
 
 // A minimal always-on-top status bar: workspace list, active window
-// title, a scratchpad indicator, and a clock. Drawn with plain core
-// Xlib text/rectangles (no Xft/fontconfig, no GTK/Qt) - matching the
-// spec's "own bar, no toolkit" goal and keeping the dependency list
-// (and therefore the whole point of this project) as light as
-// possible.
+// title, a scratchpad indicator, and a clock. Drawn with plain Xlib
+// shapes and Xft text (see Font.h) - no GTK/Qt, no fixed layout
+// toolkit - matching the spec's "own bar, no toolkit" goal while still
+// rendering every script a system font actually has installed for,
+// not just the handful of charsets classic X11 core fonts cover.
 class Bar
 {
 public:
@@ -57,10 +58,9 @@ public:
 
     // Lights up a "[N]" indicator - the doc asks for a small icon
     // ("for example, 📝") to show whether the Notepad exists/is open,
-    // but Kohiko's bar only ever draws with a plain X11 core font (no
-    // Xft/fontconfig), which has no emoji glyphs to draw with, so this
-    // uses the same bracketed-letter style as the scratchpad indicator
-    // instead of a glyph that would just render as a missing-tofu box.
+    // but this uses the same bracketed-letter style as the scratchpad
+    // indicator instead, since not every font covers emoji glyphs
+    // either and a missing one would just draw a tofu box.
     void SetNotepadActive(
         bool active
     );
@@ -95,7 +95,8 @@ private:
 
     ::Window m_window = 0;
     GC m_gc = nullptr;
-    XFontSet m_fontSet = nullptr;
+    Font m_font;
+    XftDraw* m_xftDraw = nullptr;
 
     Rect m_geometry;
     int m_height = 26;

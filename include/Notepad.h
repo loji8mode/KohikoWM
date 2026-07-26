@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Font.h"
 #include "Types.h"
 
 #include <X11/Xlib.h>
@@ -26,8 +27,8 @@ enum class NotepadResult
 // the Hyprland-ecosystem pattern ("dropdown terminal"-style special
 // workspaces wrapping an external program) the doc explicitly wants
 // Kohiko to differ from - so this is a genuinely native widget, drawn
-// the same way as Bar/Launcher (plain core Xlib text, no toolkit, no
-// extra process, no dependency beyond libX11).
+// the same way as Bar/Launcher: plain Xlib shapes plus Xft text (see
+// Font.h), no GTK/Qt, no extra process.
 class Notepad
 {
 public:
@@ -83,7 +84,8 @@ private:
 
     ::Window m_window = 0;
     GC m_gc = nullptr;
-    XFontSet m_fontSet = nullptr;
+    Font m_font;
+    XftDraw* m_xftDraw = nullptr;
 
     XIM m_xim = nullptr;
     XIC m_xic = nullptr;

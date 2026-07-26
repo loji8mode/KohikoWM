@@ -35,8 +35,10 @@ Notepad::~Notepad()
     if (m_xim)
         XCloseIM(m_xim);
 
-    if (m_fontSet)
-        XFreeFontSet(display, m_fontSet);
+    if (m_xftDraw)
+        XftDrawDestroy(m_xftDraw);
+
+    m_font.Unload();
 
     if (m_gc)
         XFreeGC(display, m_gc);
@@ -91,33 +93,16 @@ void Notepad::Configure(
 
         m_gc = XCreateGC(display, m_window, 0, nullptr);
 
-        char** missing = nullptr;
-int nmissing = 0;
-char* def = nullptr;
+        m_font.Load(
+            display,
+            screen,
+            config.GetString("general.font", "monospace:pixelsize=14"));
 
-// XCreateFontSet takes classic comma-separated XLFD base font
-// names, not fontconfig pattern syntax - "monospace:size=13" is
-// fontconfig-only syntax and never matches an XLFD font, which is
-// why m_fontSet stayed null and no text ever drew. "fixed" is the
-// XLFD alias every X11 install ships (it's xterm's own default
-// font), so it's included in both lists as a guaranteed-to-match
-// fallback.
-m_fontSet = XCreateFontSet(
-    display,
-    "-*-fixed-medium-r-normal--13-*-*-*-*-*-*-*,-*-*-medium-r-normal--13-*-*-*-*-*-*-*,fixed",
-    &missing,
-    &nmissing,
-    &def);
-
-if (!m_fontSet)
-{
-    m_fontSet = XCreateFontSet(
-        display,
-        "-*-helvetica-medium-r-normal--12-*-*-*-*-*-*-*,-*-*-medium-r-normal--12-*-*-*-*-*-*-*,fixed",
-        &missing,
-        &nmissing,
-        &def);
-}
+        m_xftDraw = XftDrawCreate(
+            display,
+            m_window,
+            DefaultVisual(display, screen),
+            DefaultColormap(display, screen));
 
         // Xutf8LookupString (used in HandleKeyPress below) needs an
         // actual input method + input context - without this m_xic
@@ -417,6 +402,12 @@ void Notepad::Redraw()
 
     XSetForeground(display, m_gc, m_foregroundPixel);
 
+    TextColor textColor(
+        display,
+        DefaultVisual(display, m_connection.Screen()),
+        DefaultColormap(display, m_connection.Screen()),
+        m_foregroundPixel);
+
     std::size_t maxLines =
         static_cast<std::size_t>(std::max(1, (m_geometry.height - padding * 2) / lineHeight));
 
@@ -439,16 +430,14 @@ void Notepad::Redraw()
         if (text.empty())
             continue;
 
-        // XCreateFontSet can legitimately return null (e.g. no XLFD
-        // font matches the requested charsets on this X server) -
-        // Xutf8DrawString requires a real fontset, so skip drawing
-        // rather than passing it null.
-        if (m_fontSet)
+        if (m_xftDraw)
         {
-            Xutf8DrawString(
-                display, m_window,  m_fontSet, m_gc,
-                padding, baseline + static_cast<int>(i - firstVisible) * lineHeight,
-                text.c_str(), static_cast<int>(text.size()));
+            m_font.DrawString(
+                m_xftDraw,
+                padding,
+                baseline + static_cast<int>(i - firstVisible) * lineHeight,
+                text,
+                textColor.Get());
         }
     }
 
