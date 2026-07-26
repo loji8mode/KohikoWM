@@ -21,6 +21,19 @@ EventDispatcher::EventDispatcher(
 void EventDispatcher::Dispatch(
     const XEvent& event)
 {
+    // XRandR's event numbers (screen/output/CRTC change notifications)
+    // are only known at runtime - XRRQueryExtension's event base, set
+    // up in MonitorManager::Initialize() - not fixed constants like
+    // every case below, so they can't be a `case` label in the switch
+    // itself; check for them first instead. IsMonitorEvent() is always
+    // false (and this a guaranteed no-op) when XRandR wasn't available
+    // at build time.
+    if (m_windowManager.IsMonitorEvent(event))
+    {
+        m_windowManager.HandleMonitorEvent(event);
+        return;
+    }
+
     switch (event.type)
     {
         case MapRequest:

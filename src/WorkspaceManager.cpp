@@ -20,16 +20,6 @@ int WorkspaceManager::Count() const
     return static_cast<int>(m_workspaces.size());
 }
 
-Workspace& WorkspaceManager::Current()
-{
-    return *m_workspaces[static_cast<std::size_t>(m_current - 1)];
-}
-
-const Workspace& WorkspaceManager::Current() const
-{
-    return *m_workspaces[static_cast<std::size_t>(m_current - 1)];
-}
-
 Workspace& WorkspaceManager::Get(
     int id)
 {
@@ -38,29 +28,12 @@ Workspace& WorkspaceManager::Get(
     return *m_workspaces[static_cast<std::size_t>(id - 1)];
 }
 
-int WorkspaceManager::CurrentId() const
+const Workspace& WorkspaceManager::Get(
+    int id) const
 {
-    return m_current;
-}
+    id = std::clamp(id, 1, static_cast<int>(m_workspaces.size()));
 
-int WorkspaceManager::PreviousId() const
-{
-    return m_previous;
-}
-
-bool WorkspaceManager::Switch(
-    int id)
-{
-    if (id < 1 || id > static_cast<int>(m_workspaces.size()))
-        return false;
-
-    if (id == m_current)
-        return false;
-
-    m_previous = m_current;
-    m_current = id;
-
-    return true;
+    return *m_workspaces[static_cast<std::size_t>(id - 1)];
 }
 
 }

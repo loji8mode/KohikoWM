@@ -75,6 +75,22 @@ Command Command::Parse(const std::string& text)
     {
         command.type = CommandType::Flip;
     }
+    else if (action == "focusmonitor")
+    {
+        command.type = CommandType::FocusMonitor;
+
+        std::string arg;
+        stream >> arg;
+        command.stringArg = Utils::Lower(arg);
+    }
+    else if (action == "movetomonitor")
+    {
+        command.type = CommandType::MoveToMonitor;
+
+        std::string arg;
+        stream >> arg;
+        command.stringArg = Utils::Lower(arg);
+    }
     else if (action == "reload")
     {
         command.type = CommandType::Reload;

@@ -25,6 +25,13 @@ enum class CommandType
     LauncherToggle,
     NotepadToggle,
 
+    // Multi-monitor: `focusmonitor <left|right|up|down|N>` and
+    // `movetomonitor <left|right|up|down|N>` - see Command::Parse()
+    // and WindowManager::FocusMonitorCommand()/
+    // MoveFocusedToMonitorCommand() for what the argument means.
+    FocusMonitor,
+    MoveToMonitor,
+
     // Rebuilds the Launcher's cached application list and file index
     // from disk right now, without restarting Kohiko - see Launcher's
     // ReloadDesktopEntries() for details.
@@ -45,7 +52,16 @@ enum class CommandType
 struct Command
 {
     CommandType type = CommandType::NoCommand;
+
+    // Exec's program/command line for CommandType::Exec; the raw,
+    // lower-cased argument word ("left"/"right"/"up"/"down"/a digit
+    // string) for FocusMonitor/MoveToMonitor - see WindowManager::
+    // FocusMonitorCommand() for why that one's left as text instead
+    // of being parsed here (it can mean either a direction or a
+    // 1-based monitor index, and only WindowManager's MonitorManager
+    // handle actually knows which monitors exist to resolve it against).
     std::string stringArg;
+
     int intArg = 0;
     Direction directionArg = Direction::Left;
 

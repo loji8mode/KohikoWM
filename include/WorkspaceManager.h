@@ -8,10 +8,18 @@
 namespace Kohiko
 {
 
-// Owns every workspace and tracks which one is current vs. previous.
-// Actually hiding/showing windows on switch is WindowManager's job
-// (it owns the WindowRepository this needs to touch); this class is
-// just the bookkeeping of "which id is active right now".
+// Owns every workspace for the lifetime of the process (fixed count,
+// set once from `workspace.count`, matching every other tiling WM's
+// "workspaces are always there, whether or not anything is currently
+// showing them" model).
+//
+// With multiple monitors there is no single "current" workspace
+// anymore - each Monitor owns its own currently-displayed one (see
+// Monitor::ActiveWorkspace()/WindowManager::SwitchWorkspaceOnMonitor())
+// and several can be visible at once. This class deliberately no
+// longer tracks any notion of a global current/previous workspace -
+// it is just the array of Workspace objects (and their independent
+// BSP trees) that every Monitor's ActiveWorkspace() points into.
 class WorkspaceManager
 {
 public:
@@ -22,33 +30,20 @@ public:
 
     int Count() const;
 
-    Workspace& Current();
-
-    const Workspace& Current() const;
-
+    // Clamped to [1, Count()] - never out of range, never null.
     Workspace& Get(
         int id
     );
 
-    int CurrentId() const;
-
-    int PreviousId() const;
-
-    // Returns false (and does nothing) if `id` is out of range or is
-    // already the current workspace.
-    bool Switch(
+    const Workspace& Get(
         int id
-    );
+    ) const;
 
 private:
 
     std::vector<
         std::unique_ptr<Workspace>
     > m_workspaces;
-
-    int m_current = 1;
-
-    int m_previous = 1;
 
 };
 

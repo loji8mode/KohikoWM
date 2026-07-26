@@ -44,6 +44,15 @@ test: build/test_bsptree
 build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
+# Needs a real X11/XRandr connection - gracefully skips the checks
+# that need one if $DISPLAY isn't set (see the file itself), so it's
+# kept separate from `make test` rather than folded into it.
+test-monitors: build/test_monitormanager
+	./build/test_monitormanager
+
+build/test_monitormanager: tests/test_monitormanager.cpp src/Monitor.cpp src/MonitorManager.cpp src/MonitorRule.cpp src/Workspace.cpp src/WorkspaceManager.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp src/Config.cpp src/XConnection.cpp src/XAtoms.cpp src/Utils.cpp src/Logger.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11 $(shell pkg-config --exists xrandr && pkg-config --libs xrandr)
+
 install: kohiko kohikoctl
 	install -Dm755 kohiko $(DESTDIR)/usr/local/bin/kohiko
 	install -Dm755 kohikoctl $(DESTDIR)/usr/local/bin/kohikoctl

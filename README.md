@@ -28,6 +28,7 @@ a full compositor.
 - [Running it](#running-it)
 - [Configuration](#configuration)
 - [Window rules](#window-rules)
+- [Multi-monitor](#multi-monitor)
 - [Autostart](#autostart)
 - [Keyboard layouts / languages](#keyboard-layouts--languages)
 - [Default keybindings](#default-keybindings)
@@ -64,6 +65,7 @@ Two build systems are provided; pick whichever you'd rather have installed.
 ```sh
 make -j$(nproc)          # -> ./kohiko, ./kohikoctl
 make test                 # unit tests for the BSP tree (no X server needed)
+make test-monitors        # MonitorManager/XRandr tests (needs a real X server - skips gracefully without one)
 sudo make install          # installs to /usr/local
 ```
 
@@ -125,9 +127,10 @@ cp config/default.conf ~/.config/kohiko/kohiko.conf
 ## Configuration
 
 The format is deliberately simple: `key=value`, one per line, `#` for
-comments. Three kinds of key are allowed to repeat (`bind=`, `exec.<name>=`,
-and `windowrule=` - see [Window rules](#window-rules)); every other key is
-a single setting where the last occurrence wins. See
+comments. Four kinds of key are allowed to repeat (`bind=`, `exec.<name>=`,
+`windowrule=` - see [Window rules](#window-rules) - and `monitor=` - see
+[Multi-monitor](#multi-monitor)); every other key is a single setting
+where the last occurrence wins. See
 [`config/default.conf`](config/default.conf) for the full annotated set -
 the highlights:
 
@@ -168,6 +171,8 @@ bind=SUPER+Q close
 
 windowrule=fullscreen class:flameshot   # see Window rules below
 windowrule=tile class:tlauncher
+
+monitor=HDMI-1,workspace=1              # see Multi-monitor below
 ```
 
 Reload after editing without restarting: `kohikoctl reload` (also bound to
@@ -222,20 +227,107 @@ transient windows (anything with `WM_TRANSIENT_FOR` set) and every
 dialog/utility/splash/toolbar/popup-menu `_NET_WM_WINDOW_TYPE` float
 automatically and never enter the BSP tree - only a plain window with
 neither (EWMH's definition of NORMAL) ever gets tiled. A transient
-child additionally always lands on whatever workspace its parent is
-actually on right now (following it there if the parent isn't on the
-current workspace), opens centered over the parent's own window rather
-than the middle of the screen, and takes focus the moment it appears -
-so a GIMP color picker, an IntelliJ/Android Studio dialog, a file
-picker, a confirmation prompt, or TLauncher's own update/login prompts
-always show up attached to the window that spawned them instead of
-floating in the wrong place or getting silently left behind on another
+child additionally always lands on whatever workspace *and monitor*
+its parent is actually on right now (bringing that workspace into view
+on the focused monitor if the parent isn't visible anywhere), opens
+centered over the parent's own window rather than the middle of the
+monitor, and takes focus the moment it appears - so a GIMP color
+picker, an IntelliJ/Android Studio dialog, a file picker, a
+confirmation prompt, or TLauncher's own update/login prompts always
+show up attached to the window that spawned them instead of floating
+in the wrong place or getting silently left behind on another
 workspace. Any floating window - automatic or `float` above - opens
 sized at whatever it actually asked for (its `WM_NORMAL_HINTS`, or
 failing that its own size at the moment it asked to be mapped) rather
 than a flat fraction of the screen, so it doesn't get squashed or
 stretched into a size it was never designed for. `windowrule=` exists
 for the apps that don't play along with that on their own.
+
+## Multi-monitor
+
+Kohiko detects every connected output via XRandr (falling back to
+treating the whole X display as one monitor if XRandr isn't available)
+and gives each one its own independent workspace, exactly like
+i3/bspwm/Hyprland: switching workspace on one monitor never touches
+what any other monitor is showing, each has its own completely
+separate `BSPTree`, and fullscreen only ever covers the monitor it was
+toggled on.
+
+```
+Monitor 1 (HDMI-1) -> Workspace 1        Monitor 1: Workspace 1 -> Workspace 2
+Monitor 2 (DP-1)   -> Workspace 5   ->   Monitor 2: Workspace 5 (unchanged)
+```
+
+If you ask for a workspace that's already showing on a *different*
+monitor, the two monitors swap what they're showing rather than ever
+displaying the same workspace twice or silently refusing - no
+workspace ever disappears just because you switched to it somewhere
+else.
+
+**Keybindings** (see `config/default.conf` to change them):
+
+| Bind | Action |
+|------|--------|
+| `Super+.` / `Super+,` | Focus the next monitor right / left |
+| `Super+Shift+.` / `Super+Shift+,` | Move the focused window to the next monitor right / left |
+
+Both also take `up`/`down` (for a vertically-stacked layout) or a
+1-based number (`focusmonitor 2`, `movetomonitor 2` - numbered
+left-to-right/top-to-bottom, the same order `kohikoctl monitors`
+lists them in) instead of a direction, if you'd rather bind those
+directly. A moved window keeps its floating/tiled/fullscreen state -
+a tiled window lands in a real slot on the destination monitor's
+workspace (falling back to floating if that workspace's layout has no
+room, same as opening a new window would); a floating one is re-homed
+into the destination's coordinate space at the same relative
+position, not just recentered. Focus itself stays on the source
+monitor afterward, the same way i3/bspwm's "move to output" doesn't
+follow the window across - only the explicit `focusmonitor` bind (or
+clicking/mousing over a window on it, if `general.focus_follows_mouse`
+is on) changes which monitor is focused.
+
+**New windows** open on whichever monitor is currently focused, except
+a transient/dialog child, which always follows its *parent's* monitor
+instead (see [Window rules](#window-rules) above) - so a launcher on
+monitor 2 always gets its own update dialog on monitor 2 too, even if
+you'd switched focus to monitor 1 in between.
+
+**Hotplug** is handled automatically: connecting or disconnecting a
+monitor re-detects the whole layout, gives any newly-connected output
+its own workspace (see `monitor=` below), and re-homes any floating
+window whose position no longer lands on *any* remaining monitor onto
+whichever one now shows its workspace, so nothing is ever left
+positioned in space that no longer exists. A tiled window needs no
+such fixup - its layout ratios simply apply to whatever monitor ends
+up showing that workspace next.
+
+Pin a specific output to a specific starting workspace with
+`monitor=<name>,workspace=<N>` (run `kohikoctl monitors` to see the
+exact output names XRandr knows your monitors by):
+
+```ini
+monitor=HDMI-1,workspace=1
+monitor=DP-1,workspace=2
+```
+
+This only affects an output the *next* time it connects (plugging it
+in, or starting Kohiko with it already attached) - it deliberately
+never yanks a workspace already on screen out from under a monitor
+just because a rule for it changed underneath it. The `monitor=`
+syntax is intentionally the same `key,key=value,...` shape
+`windowrule=` uses, so more per-monitor settings can be added later
+without a new config syntax.
+
+`kohikoctl monitors` dumps the full live state as JSON - id, XRandr
+output name, geometry, `workArea` (geometry minus whatever Kohiko's
+bar reserves), which workspace is active there, and whether it's the
+primary/focused one:
+
+```json
+[{"id":1,"name":"HDMI-1","x":0,"y":0,"width":1920,"height":1080,
+  "workArea":{"x":0,"y":26,"width":1920,"height":1054},
+  "workspace":1,"primary":true,"focused":true}]
+```
 
 ## Autostart
 
@@ -293,6 +385,8 @@ only what other programs see you type changes.
 | `Super+H/J/K/L`        | move focus left/down/up/right             |
 | `Super+1..0`           | switch to workspace 1-10                  |
 | `Super+Shift+1..0`     | send the focused window to workspace 1-10 |
+| `Super+. / Super+,`    | focus the next monitor right / left (see [Multi-monitor](#multi-monitor)) |
+| `Super+Shift+. / Super+Shift+,` | move the focused window to the next monitor right / left |
 | `Super+Shift+C`        | reload the config                         |
 | `Super+Shift+Q`        | quit Kohiko                               |
 
@@ -464,10 +558,11 @@ line-based commands, in the spirit of `hyprctl`:
 ```sh
 kohikoctl dispatch workspace 3        # anything you could put after `bind=... `
 kohikoctl dispatch close
+kohikoctl dispatch focusmonitor right # see Multi-monitor above
 kohikoctl clients                      # JSON: every managed window
 kohikoctl monitors                     # JSON: detected monitors
 kohikoctl activewindow                 # JSON: the focused window, or null
-kohikoctl tree                         # JSON: the current workspace's BSP tree
+kohikoctl tree                         # JSON: the focused monitor's workspace's BSP tree (or `tree <id>` for any workspace)
 kohikoctl reload
 kohikoctl reloadlauncher              # re-scan applications/files live, no restart needed
 kohikoctl quit
@@ -494,14 +589,14 @@ Roughly the file layout the project was designed around, one responsibility each
 | `Notepad`                  | The native `Super+N` scratch-notes box, with disk persistence |
 | `EventDispatcher`          | One `switch` over every X11 event type |
 | `XConnection`              | The only file that calls Xlib directly (almost) |
-| `WorkspaceManager` / `Workspace` | Which workspace is current/previous |
+| `WorkspaceManager` / `Workspace` | Owns every workspace (and its own independent `BSPTree`) for the process lifetime - no notion of a single "current" one; see [Multi-monitor](#multi-monitor) |
 | `WindowRepository`         | `WindowID -> ManagedWindow*`, plus the `Focused()/Floating()/Scratchpad()/Visible()` filters |
 | `ManagedWindow`            | Everything Kohiko knows about one window |
-| `Config` / `ConfigParser`  | The `key=value` file, with repeatable keys for `bind=`/`exec.*=`/`windowrule=` |
+| `Config` / `ConfigParser`  | The `key=value` file, with repeatable keys for `bind=`/`exec.*=`/`windowrule=`/`monitor=` |
 | `WindowRule`                | Parses/matches `windowrule=` lines - see [Window rules](#window-rules) |
 | `IPCServer` / `kohikoctl`  | The Unix-socket control protocol and its CLI client |
 | `Bar`                      | Workspaces, active title, scratchpad/notepad indicators, clock - plain Xlib text, no toolkit |
-| `MonitorManager` / `Monitor` | XRandr geometry when available, one-monitor fallback otherwise |
+| `MonitorManager` / `Monitor` / `MonitorRule` | XRandr detection and hotplug, one monitor's geometry/`WorkArea()`/active workspace, `monitor=` rule parsing - see [Multi-monitor](#multi-monitor) |
 
 A `BSPNode`'s `Geometry()` is its raw tree-partition rect (no gaps - used
 for hit-testing and neighbor search because it tiles the workspace with no
@@ -532,10 +627,18 @@ into a tile it's already shown it won't render into correctly.
 
 ## Known limitations
 
-- **Multi-monitor tiling is basic.** Monitor geometry is detected
-  correctly via XRandr, but all tiling currently happens against the
-  primary monitor; independent per-monitor workspaces are a plausible
-  future addition, not implemented yet.
+- **The bar, launcher, and notepad are single, global panels, always on
+  the primary monitor** - not one per output. Every workspace/window
+  still tiles and floats correctly on whichever monitor it's actually
+  on; it's specifically these three panels that don't (yet) follow you
+  across monitors the way i3bar-per-output setups do.
+- **Focus doesn't follow the mouse onto empty space on another
+  monitor** - moving the pointer onto a *window* on another monitor
+  focuses it as normal (if `general.focus_follows_mouse` is on); moving
+  it onto bare desktop background on another monitor doesn't, since
+  Kohiko doesn't currently track root-window pointer motion. `focusmonitor
+  left/right/up/down` (see [Multi-monitor](#multi-monitor)) always works
+  regardless.
 - **The scratchpad holds one window at a time** - assign a new one only
   after closing (or `Super+Space`-releasing) the current occupant.
 - Moving a **floating** window around isn't bound to anything by design

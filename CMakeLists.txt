@@ -17,6 +17,8 @@ find_package(X11 REQUIRED)
 # goes through pkg-config the same way the Makefile does.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(Xft REQUIRED IMPORTED_TARGET xft fontconfig)
+pkg_check_modules(Imlib2 REQUIRED IMPORTED_TARGET imlib2)
+pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
 
 # --- kohiko: the window manager ------------------------------------------------
 
@@ -24,7 +26,7 @@ file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 
 add_executable(kohiko ${KOHIKO_SOURCES})
 target_include_directories(kohiko PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
-target_link_libraries(kohiko PRIVATE ${X11_LIBRARIES} PkgConfig::Xft)
+target_link_libraries(kohiko PRIVATE ${X11_LIBRARIES} PkgConfig::Xft PkgConfig::Imlib2 PkgConfig::GTK3)
 target_compile_options(kohiko PRIVATE -Wall -Wextra)
 
 # Multi-monitor geometry via XRandr, enabled only if it's actually
@@ -54,6 +56,35 @@ add_executable(test_bsptree
 )
 target_include_directories(test_bsptree PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME BSPTree COMMAND test_bsptree)
+
+# Needs a real X11/XRandR connection (skips its X-dependent checks
+# gracefully if $DISPLAY isn't set - see the file for why) - the same
+# libraries kohiko itself links against for monitor detection.
+add_executable(test_monitormanager
+    tests/test_monitormanager.cpp
+    src/Monitor.cpp
+    src/MonitorManager.cpp
+    src/MonitorRule.cpp
+    src/Workspace.cpp
+    src/WorkspaceManager.cpp
+    src/BSPTree.cpp
+    src/BSPLeaf.cpp
+    src/BSPSplit.cpp
+    src/ManagedWindow.cpp
+    src/LayoutEngine.cpp
+    src/Config.cpp
+    src/XConnection.cpp
+    src/XAtoms.cpp
+    src/Utils.cpp
+    src/Logger.cpp
+)
+target_include_directories(test_monitormanager PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
+target_link_libraries(test_monitormanager PRIVATE ${X11_LIBRARIES})
+if(X11_Xrandr_FOUND)
+    target_compile_definitions(test_monitormanager PRIVATE KOHIKO_HAVE_XRANDR)
+    target_link_libraries(test_monitormanager PRIVATE ${X11_Xrandr_LIB})
+endif()
+add_test(NAME MonitorManager COMMAND test_monitormanager)
 
 # --- install ------------------------------------------------------------------------
 

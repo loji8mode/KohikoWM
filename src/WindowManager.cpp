@@ -6,6 +6,7 @@
 #include "Json.h"
 #include "Logger.h"
 #include "ManagedWindow.h"
+#include "MonitorRule.h"
 #include "Process.h"
 #include "Utils.h"
 #include "XConnection.h"
@@ -49,7 +50,35 @@ void WindowManager::Initialize()
 {
     m_atoms.Initialize();
     m_cursor.Initialize();
-    m_monitors.Detect();
+
+    // Loads `monitor=` rules, turns on XRandR hotplug reporting (when
+    // available), and runs the first Detect() - every Monitor exists
+    // and has an ActiveWorkspace() assigned by the time this returns.
+    m_monitors.Initialize(m_config);
+
+    // Gives WindowManager one last look at a Monitor object right
+    // before Detect() actually destroys it (a physical unplug, or a
+    // resolution change XRandR reports as a full output replacement) -
+    // see HandleMonitorTopologyChanged()/RelocateOrphanedFloatingWindows()
+    // for what "relocate affected windows safely" means here.
+    m_monitors.SetBeforeMonitorRemovedCallback(
+        [this](Monitor&)
+        {
+            // Nothing needs the about-to-be-destroyed Monitor object
+            // itself - Workspace objects (and therefore every window
+            // on them, tiled or floating) live in WorkspaceManager
+            // independently of any Monitor and are completely
+            // unaffected by one disappearing; they simply stop being
+            // displayed anywhere until some monitor switches back to
+            // them, exactly like backgrounding a workspace normally
+            // works. The one thing that *does* need fixing up -
+            // floating/fullscreen windows whose absolute geometry no
+            // longer overlaps any surviving monitor - is handled
+            // uniformly afterwards, once the final surviving monitor
+            // set is known, by HandleMonitorTopologyChanged() (called
+            // right after every Detect() that changed anything -
+            // see HandleMonitorEvent()) rather than per-monitor here.
+        });
 
     // Advertise EWMH support - _NET_SUPPORTED/_NET_SUPPORTING_WM_CHECK
     // let tools that check for a compliant window manager (flameshot's
@@ -100,9 +129,8 @@ void WindowManager::Initialize()
     // to dock (a tray icon, a notification) has somewhere to land.
     RunAutostart();
 
+    RefreshMonitorWorkAreas();
     Arrange();
-
-
 }
 
 void WindowManager::Shutdown()
@@ -179,8 +207,13 @@ void WindowManager::HandleConfigureRequest(const XConfigureRequestEvent& event)
         // honoured - that's what makes it "floating" - but never at
         // the cost of letting it place itself off-screen. Clamped
         // right here, before it ever reaches X11, exactly like every
-        // other geometry-then-apply site in this file.
-        const Rect& monitor = m_monitors.Primary().Geometry();
+        // other geometry-then-apply site in this file - against its
+        // own monitor, not always Primary(), so a floating window on
+        // a secondary monitor can't be resized/moved out past *that*
+        // monitor's edge just because Primary() happens to be bigger.
+        Monitor* owner = window ? MonitorShowing(window->Workspace()) : nullptr;
+        Monitor& monitorRef = owner ? *owner : FocusedMonitor();
+        const Rect& monitor = monitorRef.Geometry();
         int borderWidth = window ? window->BorderWidth() : static_cast<int>(event.border_width);
         Rect clamped = requested.ClampedTo(monitor, borderWidth);
 
@@ -453,6 +486,30 @@ void WindowManager::HandleClientMessage(const XClientMessageEvent& event)
     Arrange();
 }
 
+bool WindowManager::IsMonitorEvent(const XEvent& event) const
+{
+    return m_monitors.IsRandrEvent(event);
+}
+
+void WindowManager::HandleMonitorEvent(const XEvent& event)
+{
+    // Re-enumerates outputs and reconciles the monitor list - see
+    // MonitorManager::Detect(). Always followed by
+    // HandleMonitorTopologyChanged() below, whether or not the
+    // monitor *set* actually changed shape: a plain resolution/
+    // rotation change on an already-known output still needs work
+    // areas recomputed and everything re-Arrange()d against the new
+    // geometry, even though no monitor was actually added or removed.
+    m_monitors.HandleXEvent(event);
+
+    Logger::Info(
+        "monitor layout changed (" +
+        std::to_string(m_monitors.All().size()) +
+        " connected) - re-arranging");
+
+    HandleMonitorTopologyChanged();
+}
+
 bool WindowManager::HandleModalKeyPress(const XKeyEvent& event)
 {
     if (m_launcher.IsOpen())
@@ -505,6 +562,8 @@ void WindowManager::Execute(const Command& command)
         case CommandType::FocusDirection:   FocusDirection(command.directionArg);  break;
         case CommandType::Rotate:           RotateFocused();                       break;
         case CommandType::Flip:             FlipFocused();                         break;
+        case CommandType::FocusMonitor:     FocusMonitorCommand(command.stringArg);      break;
+        case CommandType::MoveToMonitor:    MoveFocusedToMonitorCommand(command.stringArg); break;
         case CommandType::Reload:           ReloadConfig();                        break;
         case CommandType::Quit:             m_running = false;                     break;
         case CommandType::LauncherToggle:   ToggleLauncher();                      break;
@@ -525,7 +584,17 @@ void WindowManager::Execute(const Command& command)
 
 ManagedWindow* WindowManager::WindowAt(const Point& point)
 {
-    return m_workspaces.Current().Tree().HitTest(point);
+    Monitor* monitor = m_monitors.Containing(point);
+
+    if (!monitor)
+        monitor = &FocusedMonitor();
+
+    Workspace* workspace = monitor->ActiveWorkspace();
+
+    if (!workspace)
+        return nullptr;
+
+    return workspace->Tree().HitTest(point);
 }
 
 void WindowManager::SwapWindows(ManagedWindow* first, ManagedWindow* second)
@@ -681,7 +750,15 @@ std::string WindowManager::HandleIpcCommand(const std::string& request)
         return DumpActiveWindowJson();
 
     if (verb == "tree")
-        return m_workspaces.Current().Tree().Serialize();
+    {
+        int id = 0;
+        stream >> id;
+
+        if (id < 1 || id > m_workspaces.Count())
+            id = FocusedWorkspaceId();
+
+        return m_workspaces.Get(id).Tree().Serialize();
+    }
 
     if (verb == "reload")
     {
@@ -742,8 +819,13 @@ void WindowManager::Manage(WindowID id)
     window->SetRole(m_connection.GetWindowRole(id, m_atoms));
     window->SetPid(m_connection.GetWindowPid(id, m_atoms));
 
-    window->SetWorkspace(m_workspaces.CurrentId());
-    window->SetMonitor(0);
+    // Provisional - a `windowrule=workspace:N` match or a transient's
+    // parent (both resolved below, once we know them) can override
+    // this; a plain top-level window keeps it as-is, landing on
+    // whichever monitor/workspace the user was actually looking at
+    // when they opened it.
+    window->SetWorkspace(FocusedWorkspaceId());
+    window->SetMonitor(FocusedMonitor().Id());
     window->SetBorderWidth(m_config.GetInt("general.border_size", 2));
 
     // Needed before TryTile() below - a client (TLauncher's real UI is
@@ -799,6 +881,22 @@ void WindowManager::Manage(WindowID id)
     else if (parent)
         window->SetWorkspace(parent->Workspace());
 
+    // Window Placement: a transient/dialog always follows its parent's
+    // *monitor*, not just its workspace - if the parent's workspace is
+    // currently visible somewhere, that monitor is where this window
+    // belongs too, full stop, regardless of which monitor is focused
+    // right now. Everything else (a plain top-level window, or a
+    // `windowrule=workspace:N` window whose forced workspace happens
+    // to already be visible on some other monitor) follows the same
+    // "wherever that workspace actually is right now" rule; only a
+    // window landing on a workspace nothing is currently showing falls
+    // back to FocusedMonitor() - there's no "correct" monitor for a
+    // window that isn't visible anywhere yet, so the one the user is
+    // actually looking at is the least surprising choice.
+    Monitor* shownOn = MonitorShowing(window->Workspace());
+    Monitor& targetMonitor = shownOn ? *shownOn : FocusedMonitor();
+    window->SetMonitor(targetMonitor.Id());
+
     // `windowrule=tile` is an explicit "no matter what this
     // application's own hints say, force it into the tiling layout"
     // override - a Java/Swing launcher that insists on floating at its
@@ -822,23 +920,23 @@ void WindowManager::Manage(WindowID id)
     {
         window->SetState(WindowState::Floating);
 
-        Rect geometry = CenteredFloatingRectForWindow(id, attrs, parent);
+        Rect geometry = CenteredFloatingRectForWindow(id, attrs, targetMonitor, parent);
         window->SetGeometry(geometry);
         window->SetFloatingGeometry(geometry);
 
         m_connection.MoveResizeWindow(id, geometry);
         m_connection.SetBorderWidth(id, window->BorderWidth());
     }
-    else if (TryTile(window, window->Workspace()))
+    else if (TryTile(window, window->Workspace(), targetMonitor))
     {
         // Tiled on the current workspace - the common case.
     }
     else
     {
         int currentWorkspace = window->Workspace();
-        int alternate = FindWorkspaceWithRoom(window, currentWorkspace);
+        int alternate = FindWorkspaceWithRoom(window, currentWorkspace, targetMonitor);
 
-        if (alternate != 0 && TryTile(window, alternate))
+        if (alternate != 0 && TryTile(window, alternate, targetMonitor))
         {
             Logger::Info(
                 "Workspace " + std::to_string(currentWorkspace) +
@@ -868,7 +966,7 @@ void WindowManager::Manage(WindowID id)
                 if (target != 0 && target != currentWorkspace)
                 {
                     window->SetWorkspace(target);
-                    placed = TryTile(window, target);
+                    placed = TryTile(window, target, targetMonitor);
 
                     if (placed)
                     {
@@ -895,7 +993,7 @@ void WindowManager::Manage(WindowID id)
                 // floating it instead.
                 window->SetState(WindowState::Floating);
 
-                Rect geometry = CenteredFloatingRectForWindow(id, attrs, parent);
+                Rect geometry = CenteredFloatingRectForWindow(id, attrs, targetMonitor, parent);
                 window->SetGeometry(geometry);
                 window->SetFloatingGeometry(geometry);
 
@@ -934,42 +1032,41 @@ void WindowManager::Manage(WindowID id)
     }
 
     // A transient/dialog child was pinned to its parent's workspace
-    // above, whichever one that turns out to be - if that's not the
-    // workspace currently on screen, switching to it now is what makes
-    // "always appear attached to its parent" actually true, rather
-    // than just true in the bookkeeping while the window itself sits
-    // unmapped in the background until someone happens to switch over
-    // manually. Deliberately gated on `parent` (not just "landed on a
-    // background workspace" in general) - an ordinary `windowrule=
-    // workspace:N` window with no parent is *supposed* to open quietly
-    // in the background without yanking focus away from whatever the
-    // user is doing (see the comment on that rule in ResolveWindowRules's
-    // caller above); only a transient explicitly follows its parent
-    // into view. Compares against window->Workspace() rather than
-    // parent->Workspace() directly so an explicit `windowrule=
-    // workspace:N` that disagreed with the parent's workspace (it wins,
-    // above) is still respected here rather than switching to
-    // wherever the parent happens to be instead.
-    //
-    // SwitchWorkspace() unmaps the old workspace, arranges and maps the
-    // new one (which by now already includes this window - it was
-    // added to m_repository, and had its workspace set, above), and
-    // focuses whatever it finds first there; the block below then
-    // takes over and re-focuses this window specifically, exactly the
-    // same way it already corrects for SwitchWorkspace()'s "focus the
-    // front visible window" default in the normal switch-workspace path.
-    if (parent && window->Workspace() != m_workspaces.CurrentId())
-        SwitchWorkspace(window->Workspace());
+    // (and, via targetMonitor above, its parent's monitor) already -
+    // Window Placement's "transient/dialog windows must always follow
+    // their parent monitor". What's left is making sure it's actually
+    // *visible*: if the parent's workspace is already showing on some
+    // monitor (the common case - the parent has to be visible for a
+    // dialog to even make sense), just move focus there so the new
+    // dialog gets keyboard input without touching what any other
+    // monitor is showing; only a parent sitting on a background
+    // workspace nobody's displaying needs that workspace actually
+    // switched onto the focused monitor to bring both it and the new
+    // dialog into view. Deliberately gated on `parent` (not just
+    // "landed on a background workspace" in general) - an ordinary
+    // `windowrule=workspace:N` window with no parent is *supposed* to
+    // open quietly in the background without yanking focus away from
+    // whatever the user is doing (see the comment on that rule in
+    // ResolveWindowRules's caller above); only a transient explicitly
+    // follows its parent into view.
+    if (parent)
+    {
+        if (Monitor* visibleOn = MonitorShowing(window->Workspace()))
+            FocusMonitor(*visibleOn);
+        else
+            SwitchWorkspaceOnMonitor(FocusedMonitor(), window->Workspace());
+    }
 
     // A window the fallback above redistributed onto a *different*
-    // workspace must stay unmapped and unfocused, exactly like every
-    // other window living on a workspace that isn't the current one -
-    // SwitchWorkspace() is what maps it and gives it a chance at focus
-    // once the user actually switches there. Mapping/focusing it here
-    // regardless of which workspace it landed on would show a window
-    // nobody asked to see right now and steal focus from whatever *is*
-    // currently visible.
-    if (window->Workspace() == m_workspaces.CurrentId())
+    // (background) workspace must stay unmapped and unfocused, exactly
+    // like every other window living on a workspace nothing is
+    // currently displaying - Arrange() unmaps it below regardless
+    // (see its comment), and it gets its chance at focus once some
+    // monitor actually switches to that workspace. Mapping/focusing it
+    // here regardless of visibility would show a window nobody asked
+    // to see right now and steal focus from whatever *is* currently on
+    // screen.
+    if (IsWorkspaceVisible(window->Workspace()))
     {
         // Resize into its real tile slot *before* mapping, not after.
         // A client (Java/Swing apps like TLauncher are the reliable
@@ -1064,6 +1161,25 @@ void WindowManager::Focus(WindowID id)
     if (!window)
         return;
 
+    // Keeps "the focused monitor" honest with "the focused window" -
+    // every path that ends up focusing a window (a click, the mouse
+    // entering it, a workspace switch, a Swap drag landing somewhere,
+    // a new window opening, ...) funnels through here, so this is the
+    // one place that needs to know about it rather than every call
+    // site separately remembering to. Skipped for a scratchpad window:
+    // it's reachable from every workspace on every monitor, so its
+    // Workspace() field is just wherever it'll restore to if it's ever
+    // un-scratchpadded, not "where it lives" - MonitorShowing() on
+    // that would be meaningless at best and actively wrong at worst
+    // (jumping focus to some unrelated monitor that stale workspace id
+    // happens to currently be showing). ToggleScratchpadForFocused()
+    // already picks the right monitor for it directly.
+    if (!window->IsScratchpad())
+    {
+        if (Monitor* monitor = MonitorShowing(window->Workspace()))
+            m_monitors.SetFocused(monitor);
+    }
+
     m_repository.ClearFocus();
     window->SetFocused(true);
 
@@ -1074,7 +1190,7 @@ void WindowManager::Focus(WindowID id)
 
     RefreshBorderColor(window);
 
-    for (ManagedWindow* other : m_repository.Visible(m_workspaces.CurrentId()))
+    for (ManagedWindow* other : m_repository.Visible(window->Workspace()))
     {
         if (other->Id() != id)
             RefreshBorderColor(other);
@@ -1086,13 +1202,27 @@ void WindowManager::Focus(WindowID id)
 
 void WindowManager::FocusNextAvailable()
 {
-    auto visible = m_repository.Visible(m_workspaces.CurrentId());
+    FocusNextAvailableOn(FocusedMonitor());
+}
+
+void WindowManager::FocusNextAvailableOn(Monitor& monitor)
+{
+    Workspace* workspace = monitor.ActiveWorkspace();
+    auto visible = workspace ? m_repository.Visible(workspace->Id()) : std::vector<ManagedWindow*>{};
 
     if (!visible.empty())
     {
         Focus(visible.front()->Id());
         return;
     }
+
+    // Nothing left on that monitor's workspace. Only actually clear
+    // real X input focus (and the bar's title) when it's the focused
+    // monitor losing its last window - fixing up a *different*
+    // monitor's now-empty workspace shouldn't steal focus away from
+    // whatever the user is actually looking at.
+    if (&monitor != m_monitors.Focused())
+        return;
 
     m_repository.ClearFocus();
     m_connection.SetInputFocus(m_connection.Root());
@@ -1103,59 +1233,66 @@ void WindowManager::FocusNextAvailable()
 
 void WindowManager::Arrange()
 {
-    Workspace& workspace = m_workspaces.Current();
-    const Rect& monitor = m_monitors.Primary().Geometry();
-    Rect tilingArea = TilingArea();
+    RefreshMonitorWorkAreas();
 
-    LayoutEngine::Params params;
-    params.innerGap     = m_config.GetInt("general.inner_gap", 6);
-    params.outerGap     = m_config.GetInt("general.outer_gap", 6);
-    params.borderWidth  = m_config.GetInt("general.border_size", 2);
-    params.smartGaps    = m_config.GetBool("general.smart_gaps", true);
-    params.smartBorders  = m_config.GetBool("general.smart_borders", true);
+    // The set of workspace ids visible *somewhere* right now - one
+    // per monitor (MonitorManager guarantees no two monitors ever
+    // share an ActiveWorkspace(), so this is also each monitor's
+    // workspace exactly once). Everything below - which windows get
+    // unmapped, which get laid out - is driven off this, not any
+    // single "current" id.
+    std::vector<int> visibleWorkspaceIds;
 
-    if (!workspace.Tree().Empty())
-        m_layout.Apply(workspace.Tree().Root(), tilingArea, params);
+    for (const auto& monitor : m_monitors.All())
+        if (monitor->ActiveWorkspace())
+            visibleWorkspaceIds.push_back(monitor->ActiveWorkspace()->Id());
 
-    ManagedWindow* fullscreenWindow = nullptr;
-
-    for (ManagedWindow* window : m_repository.Visible(m_workspaces.CurrentId()))
+    auto isVisible = [&](int workspaceId)
     {
-        if (window == m_activeDragWindow)
-            continue; // being driven directly by the Swap drag right now - don't snap it back
+        return std::find(visibleWorkspaceIds.begin(), visibleWorkspaceIds.end(), workspaceId)
+            != visibleWorkspaceIds.end();
+    };
 
-        if (window->IsFullscreen())
-        {
-            fullscreenWindow = window;
+    // Unmap anything that isn't on a currently-visible workspace.
+    // Centralising this here - rather than every call site that
+    // changes what should be visible (a workspace switch, a window
+    // moving to another workspace/monitor, a hotplug, ...) separately
+    // remembering to unmap what it just hid - is what makes those
+    // call sites safe to write as "mutate state, then call Arrange()"
+    // without having to reason about mapping themselves; see
+    // ArrangeMonitor() below for the mirror-image "map/position
+    // whatever should be visible" half.
+    //
+    // Only touches windows X still actually reports as mapped -
+    // repeating XUnmapWindow() on one that's already unmapped is a
+    // silent no-op that generates no UnmapNotify, so it would never
+    // get paired back off by ConsumeIgnoredUnmap() and the ignore
+    // count kept below would just grow forever, eventually causing a
+    // *real* future close to be wrongly swallowed as "just Kohiko
+    // hiding it" instead of "the client actually went away".
+    for (ManagedWindow* window : m_repository.All())
+    {
+        if (window->IsScratchpad() || window == m_activeDragWindow)
             continue;
-        }
 
-        if (window->IsFloating())
-        {
-            m_connection.MoveResizeWindow(window->Id(), window->Geometry());
-            m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
-            m_connection.Raise(window->Id());
+        if (isVisible(window->Workspace()))
             continue;
-        }
 
-        m_connection.MoveResizeWindow(window->Id(), window->Geometry());
-        m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
+        XWindowAttributes attrs{};
+
+        if (m_connection.GetWindowAttributes(window->Id(), attrs) && attrs.map_state == IsUnmapped)
+            continue;
+
+        window->IgnoreNextUnmap();
+        m_connection.UnmapWindow(window->Id());
     }
 
-    if (fullscreenWindow)
-    {
-        m_connection.MoveResizeWindow(fullscreenWindow->Id(), monitor);
-        m_connection.SetBorderWidth(fullscreenWindow->Id(), 0);
-        m_connection.Raise(fullscreenWindow->Id());
+    for (const auto& monitor : m_monitors.All())
+        ArrangeMonitor(*monitor);
 
-        // Keep bookkeeping (IPC/`kohikoctl clients` reporting) in sync
-        // with what's actually on screen - the tree still computed a
-        // tiled-slot rect for this leaf above, but that's not where
-        // the window really is right now.
-        fullscreenWindow->SetGeometry(monitor);
-    }
+    Workspace* focusedWorkspace = FocusedMonitor().ActiveWorkspace();
 
-    m_bar.SetWorkspaces(m_workspaces.Count(), m_workspaces.CurrentId());
+    m_bar.SetWorkspaces(m_workspaces.Count(), focusedWorkspace ? focusedWorkspace->Id() : 0);
     m_bar.SetScratchpadActive(m_scratchpad.HasWindow() && m_scratchpad.IsVisible());
     m_bar.SetNotepadActive(m_notepad.HasContent());
     m_bar.Redraw();
@@ -1171,18 +1308,109 @@ void WindowManager::Arrange()
     m_connection.Flush();
 }
 
-Rect WindowManager::TilingArea()
+void WindowManager::ArrangeMonitor(Monitor& monitor)
 {
-    const Rect& monitor = m_monitors.Primary().Geometry();
+    Workspace* workspace = monitor.ActiveWorkspace();
 
-    Rect area = monitor;
-    area.y += m_bar.Height();
-    area.height -= m_bar.Height();
+    if (!workspace)
+        return;
 
-    return area;
+    Rect tilingArea = TilingArea(monitor);
+
+    LayoutEngine::Params params;
+    params.innerGap     = m_config.GetInt("general.inner_gap", 6);
+    params.outerGap     = m_config.GetInt("general.outer_gap", 6);
+    params.borderWidth  = m_config.GetInt("general.border_size", 2);
+    params.smartGaps    = m_config.GetBool("general.smart_gaps", true);
+    params.smartBorders  = m_config.GetBool("general.smart_borders", true);
+
+    if (!workspace->Tree().Empty())
+        m_layout.Apply(workspace->Tree().Root(), tilingArea, params);
+
+    ManagedWindow* fullscreenWindow = nullptr;
+
+    for (ManagedWindow* window : m_repository.Visible(workspace->Id()))
+    {
+        // Bookkeeping (IPC/`kohikoctl clients` reporting, and Focus()'s
+        // "which monitor does this window's workspace live on"
+        // lookups) - kept current for every visible window on every
+        // pass, not just when a window first lands here.
+        window->SetMonitor(monitor.Id());
+
+        if (window == m_activeDragWindow)
+            continue; // being driven directly by the Swap drag right now - don't snap it back
+
+        if (window->IsFullscreen())
+        {
+            fullscreenWindow = window;
+            continue;
+        }
+
+        if (window->IsFloating())
+        {
+            m_connection.MoveResizeWindow(window->Id(), window->Geometry());
+            m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
+            m_connection.MapWindow(window->Id());
+            m_connection.Raise(window->Id());
+            continue;
+        }
+
+        m_connection.MoveResizeWindow(window->Id(), window->Geometry());
+        m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
+        m_connection.MapWindow(window->Id());
+    }
+
+    if (fullscreenWindow)
+    {
+        const Rect& full = monitor.Geometry();
+
+        m_connection.MoveResizeWindow(fullscreenWindow->Id(), full);
+        m_connection.SetBorderWidth(fullscreenWindow->Id(), 0);
+        m_connection.MapWindow(fullscreenWindow->Id());
+        m_connection.Raise(fullscreenWindow->Id());
+
+        // Keep bookkeeping (IPC/`kohikoctl clients` reporting) in sync
+        // with what's actually on screen - the tree still computed a
+        // tiled-slot rect for this leaf above, but that's not where
+        // the window really is right now.
+        fullscreenWindow->SetGeometry(full);
+    }
 }
 
-void WindowManager::RefreshWorkspaceGeometry(int workspaceId)
+void WindowManager::RefreshMonitorWorkAreas()
+{
+    // The bar is a single, global panel today (see Bar.h) - always
+    // hosted on Primary(), regardless of which monitor is focused.
+    // Every other monitor's work area is simply its full geometry.
+    // Kept as its own pass (rather than folded into ArrangeMonitor())
+    // so TryTile()/CenteredFloatingRect()/FindWorkspaceWithRoom() can
+    // all read a monitor's WorkArea() directly without needing to
+    // know the bar even exists.
+    for (const auto& monitor : m_monitors.All())
+    {
+        Rect area = monitor->Geometry();
+
+        // monitor->IsPrimary() alone isn't quite enough: XRandR is
+        // never required to actually mark anything primary, and when
+        // nothing does, Primary() itself falls back to the leftmost
+        // connected monitor - comparing identity against Primary()'s
+        // actual return value is what stays correct in that case too.
+        if (monitor.get() == &m_monitors.Primary())
+        {
+            area.y += m_bar.Height();
+            area.height -= m_bar.Height();
+        }
+
+        monitor->SetWorkArea(area);
+    }
+}
+
+Rect WindowManager::TilingArea(Monitor& monitor)
+{
+    return monitor.WorkArea();
+}
+
+void WindowManager::RefreshWorkspaceGeometry(int workspaceId, Monitor& referenceMonitor)
 {
     Workspace& workspace = m_workspaces.Get(workspaceId);
 
@@ -1196,52 +1424,137 @@ void WindowManager::RefreshWorkspaceGeometry(int workspaceId)
     params.smartGaps    = m_config.GetBool("general.smart_gaps", true);
     params.smartBorders = m_config.GetBool("general.smart_borders", true);
 
-    // Same computation Arrange() would do for the current workspace -
-    // just without the X11 MoveResizeWindow/MapWindow side that only
-    // makes sense for whatever's actually on screen right now.
-    m_layout.Apply(workspace.Tree().Root(), TilingArea(), params);
+    // Same computation ArrangeMonitor() would do for a workspace that
+    // actually is some monitor's ActiveWorkspace() right now - just
+    // without the X11 MoveResizeWindow/MapWindow side that only makes
+    // sense for whatever's actually on screen right now.
+    m_layout.Apply(workspace.Tree().Root(), TilingArea(referenceMonitor), params);
 }
 
 void WindowManager::SwitchWorkspace(int id)
 {
-    if (!m_workspaces.Switch(id))
+    SwitchWorkspaceOnMonitor(FocusedMonitor(), id);
+}
+
+void WindowManager::SwitchWorkspaceOnMonitor(Monitor& monitor, int id)
+{
+    if (id < 1 || id > m_workspaces.Count())
         return;
 
-    int previous = m_workspaces.PreviousId();
+    Workspace* current = monitor.ActiveWorkspace();
 
-    for (ManagedWindow* window : m_repository.Visible(previous))
+    if (current && current->Id() == id)
+        return; // already showing it - nothing to do
+
+    // Workspace Assignment: switching workspace on one monitor must
+    // NOT affect other monitors - if `id` is already active somewhere
+    // else, the only way to honour that *and* still switch `monitor`
+    // to it is to swap the two monitors' active workspaces, rather
+    // than ever letting the same workspace show on two monitors at
+    // once (which would make "switching workspace on one monitor"
+    // implicitly steal it out from under whichever other monitor was
+    // showing it) or silently refusing the switch outright.
+    if (Monitor* other = MonitorShowing(id))
     {
-        window->IgnoreNextUnmap();
-        m_connection.UnmapWindow(window->Id());
+        Workspace* othersCurrent = other->ActiveWorkspace();
+
+        other->SetWorkspace(current);
+        monitor.SetWorkspace(othersCurrent);
+    }
+    else
+    {
+        monitor.SetWorkspace(&m_workspaces.Get(id));
     }
 
-    // Arrange() before mapping, not after - see the matching comment
-    // in Manage(). Windows on this workspace that were opened while it
-    // was in the background never had MoveResizeWindow() applied to
-    // their actual X window (only the tree's cached rect was kept
-    // fresh, by RefreshWorkspaceGeometry()), so without this they'd be
-    // mapped at whatever size they were created at and resized to the
-    // real tile slot a moment later - the exact "content stuck in a
-    // corner" symptom, just triggered by switching workspaces instead
-    // of opening the window.
+    // Arrange() is what actually unmaps whatever either monitor was
+    // just showing and maps/positions whatever it's showing now - see
+    // its comment. Every window that was ever tiled onto `id` while it
+    // sat in the background already has fresh cached geometry (from
+    // RefreshWorkspaceGeometry(), called by TryTile() for exactly this
+    // reason), so there's no "resize immediately after mapping"
+    // flicker to worry about here the way a brand new window opening
+    // has to guard against in Manage().
     Arrange();
 
-    for (ManagedWindow* window : m_repository.Visible(m_workspaces.CurrentId()))
-        m_connection.MapWindow(window->Id());
+    FocusMonitor(monitor);
+}
 
-    auto visible = m_repository.Visible(m_workspaces.CurrentId());
+Monitor& WindowManager::FocusedMonitor() const
+{
+    Monitor* focused = m_monitors.Focused();
+
+    return focused ? *focused : m_monitors.Primary();
+}
+
+int WindowManager::FocusedWorkspaceId() const
+{
+    Workspace* workspace = FocusedMonitor().ActiveWorkspace();
+
+    return workspace ? workspace->Id() : 1;
+}
+
+Monitor* WindowManager::MonitorShowing(int workspaceId) const
+{
+    for (const auto& monitor : m_monitors.All())
+        if (monitor->ActiveWorkspace() && monitor->ActiveWorkspace()->Id() == workspaceId)
+            return monitor.get();
+
+    return nullptr;
+}
+
+bool WindowManager::IsWorkspaceVisible(int workspaceId) const
+{
+    return MonitorShowing(workspaceId) != nullptr;
+}
+
+void WindowManager::FocusMonitor(Monitor& monitor)
+{
+    m_monitors.SetFocused(&monitor);
+
+    Workspace* workspace = monitor.ActiveWorkspace();
+    auto visible = workspace ? m_repository.Visible(workspace->Id()) : std::vector<ManagedWindow*>{};
 
     if (!visible.empty())
     {
         Focus(visible.front()->Id());
+        return;
     }
+
+    // Nothing on this monitor to focus - clear real X input focus
+    // (Focus(id) is never reached to do it for us) while still making
+    // sure the bar reflects the workspace this monitor is now showing.
+    m_repository.ClearFocus();
+    m_connection.SetInputFocus(m_connection.Root());
+    m_connection.SetActiveWindow(m_atoms, None);
+    m_bar.SetTitle("");
+    m_bar.SetWorkspaces(m_workspaces.Count(), workspace ? workspace->Id() : 0);
+    m_bar.Redraw();
+}
+
+void WindowManager::FocusMonitorCommand(const std::string& arg)
+{
+    Monitor* target = nullptr;
+
+    if (arg == "left")       target = m_monitors.Neighbor(FocusedMonitor(), Direction::Left);
+    else if (arg == "right") target = m_monitors.Neighbor(FocusedMonitor(), Direction::Right);
+    else if (arg == "up")    target = m_monitors.Neighbor(FocusedMonitor(), Direction::Up);
+    else if (arg == "down")  target = m_monitors.Neighbor(FocusedMonitor(), Direction::Down);
     else
     {
-        m_repository.ClearFocus();
-        m_connection.SetInputFocus(m_connection.Root());
-        m_bar.SetTitle("");
-        m_bar.Redraw();
+        try
+        {
+            target = m_monitors.ByIndex(std::stoi(arg));
+        }
+        catch (...)
+        {
+            target = nullptr;
+        }
     }
+
+    if (!target || target == &FocusedMonitor())
+        return;
+
+    FocusMonitor(*target);
 }
 
 void WindowManager::MoveFocusedToWorkspace(int id)
@@ -1253,6 +1566,15 @@ void WindowManager::MoveFocusedToWorkspace(int id)
 
     int oldWorkspaceId = window->Workspace();
 
+    // Whichever monitor is currently showing the destination workspace
+    // is what TryTile()'s capacity math (and the floating fallback's
+    // CenteredFloatingRect()) should be sized against - falling back
+    // to FocusedMonitor() only for a purely background destination
+    // nothing is displaying right now (see TryTile()'s comment on why
+    // that's a fine best-effort guess either way).
+    Monitor* shownOn = MonitorShowing(id);
+    Monitor& referenceMonitor = shownOn ? *shownOn : FocusedMonitor();
+
     bool wasTiled = window->IsTiled();
     bool wasFullscreenTile =
         window->IsFullscreen() && window->PreviousState() == WindowState::Tiled;
@@ -1262,7 +1584,7 @@ void WindowManager::MoveFocusedToWorkspace(int id)
 
     window->SetWorkspace(id);
 
-    if (wasTiled && !TryTile(window, id))
+    if (wasTiled && !TryTile(window, id, referenceMonitor))
     {
         // TryTile() only fails the capacity check, so the window isn't
         // in any tree right now - land it floating instead of forcing
@@ -1274,7 +1596,7 @@ void WindowManager::MoveFocusedToWorkspace(int id)
         Rect geometry = window->FloatingGeometry();
 
         if (geometry.width <= 0 || geometry.height <= 0)
-            geometry = CenteredFloatingRect(0.5f, 0.5f);
+            geometry = CenteredFloatingRect(referenceMonitor, 0.5f, 0.5f);
 
         window->SetGeometry(geometry);
         window->SetFloatingGeometry(geometry);
@@ -1298,7 +1620,7 @@ void WindowManager::MoveFocusedToWorkspace(int id)
         // that opened there directly (see OccupiesTreeSlot()'s
         // comment for why this can't just reuse the old workspace's
         // now-removed leaf).
-        if (TryTile(window, id))
+        if (TryTile(window, id, referenceMonitor))
         {
             // TryTile() always sets Tiled - it's still genuinely
             // fullscreen right now, so put that straight back.
@@ -1314,11 +1636,156 @@ void WindowManager::MoveFocusedToWorkspace(int id)
         }
     }
 
-    window->IgnoreNextUnmap();
-    m_connection.UnmapWindow(window->Id());
+    // A window that was already floating (neither branch above ran)
+    // keeps its FloatingGeometry() as-is when moved onto a background
+    // workspace - there's no "correct" monitor to place it on until
+    // something actually shows that workspace (RelocateOrphanedFloatingWindows()
+    // is the general safety net for a rect that ends up nowhere real).
+    // But if `id` is already visible on some *other* monitor right
+    // now, the window is about to actually appear there immediately -
+    // re-home its absolute coordinates into that monitor's space, the
+    // same way MoveWindowToMonitor() does for an explicit monitor move,
+    // so it doesn't just vanish off both screens.
+    if (!wasTiled && !wasFullscreenTile && window->IsFloating() && shownOn && shownOn != &FocusedMonitor())
+    {
+        Rect relocated = RelocateRectToMonitor(window->Geometry(), FocusedMonitor().WorkArea(), shownOn->WorkArea());
+        window->SetGeometry(relocated);
+        window->SetFloatingGeometry(relocated);
+    }
 
+    // No manual unmap here - Arrange() unmaps anything that ends up on
+    // a workspace nothing is currently showing, and just as happily
+    // maps it straight onto its new tile if `id` turns out to already
+    // be visible on another monitor (moving a window *between* two
+    // monitors that are both on screen right now is exactly the case
+    // the old single-monitor "always unmap unconditionally" version of
+    // this function could never actually hit).
     Arrange();
     FocusNextAvailable();
+}
+
+void WindowManager::MoveFocusedToMonitorCommand(const std::string& arg)
+{
+    ManagedWindow* window = m_repository.Focused();
+
+    if (!window)
+        return;
+
+    Monitor* target = nullptr;
+
+    if (arg == "left")       target = m_monitors.Neighbor(FocusedMonitor(), Direction::Left);
+    else if (arg == "right") target = m_monitors.Neighbor(FocusedMonitor(), Direction::Right);
+    else if (arg == "up")    target = m_monitors.Neighbor(FocusedMonitor(), Direction::Up);
+    else if (arg == "down")  target = m_monitors.Neighbor(FocusedMonitor(), Direction::Down);
+    else
+    {
+        try
+        {
+            target = m_monitors.ByIndex(std::stoi(arg));
+        }
+        catch (...)
+        {
+            target = nullptr;
+        }
+    }
+
+    if (!target || target == &FocusedMonitor())
+        return;
+
+    MoveWindowToMonitor(window, *target);
+}
+
+void WindowManager::MoveWindowToMonitor(ManagedWindow* window, Monitor& target)
+{
+    if (!window)
+        return;
+
+    Workspace* targetWorkspace = target.ActiveWorkspace();
+
+    if (!targetWorkspace || window->Workspace() == targetWorkspace->Id())
+        return;
+
+    Monitor* sourceMonitor = MonitorShowing(window->Workspace());
+
+    int oldWorkspaceId = window->Workspace();
+    int targetWorkspaceId = targetWorkspace->Id();
+
+    bool wasTiled = window->IsTiled();
+    bool wasFullscreenTile =
+        window->IsFullscreen() && window->PreviousState() == WindowState::Tiled;
+    bool wasFullscreenFloat =
+        window->IsFullscreen() && window->PreviousState() == WindowState::Floating;
+
+    if (wasTiled || wasFullscreenTile)
+        m_workspaces.Get(oldWorkspaceId).Tree().Remove(window);
+
+    window->SetWorkspace(targetWorkspaceId);
+    window->SetMonitor(target.Id());
+
+    if (wasTiled || wasFullscreenTile)
+    {
+        if (TryTile(window, targetWorkspaceId, target))
+        {
+            if (wasFullscreenTile)
+                window->SetState(WindowState::Fullscreen);
+        }
+        else
+        {
+            // Moving Windows: "preserve floating state if floating" -
+            // there's no floating state to preserve here (it was
+            // tiled), but the same principle applies in spirit: a
+            // window that can't keep the property it had (a real tile
+            // slot) on the destination monitor still has to land
+            // *somewhere* sane rather than fail the move outright, so
+            // it floats there instead - exactly TryTile()'s own
+            // capacity-exceeded fallback, just reached via a monitor
+            // move instead of a fresh open.
+            window->SetState(wasFullscreenTile ? WindowState::Fullscreen : WindowState::Floating);
+
+            if (wasFullscreenTile)
+                window->SetPreviousState(WindowState::Floating);
+
+            Rect geometry = CenteredFloatingRect(target, 0.5f, 0.5f);
+            window->SetGeometry(geometry);
+            window->SetFloatingGeometry(geometry);
+        }
+    }
+    else if (window->IsFloating() || wasFullscreenFloat)
+    {
+        // Moving Windows: "preserve floating state if floating" - kept
+        // floating, but re-homed from the source monitor's coordinate
+        // space into the destination's, at the same *relative*
+        // position/size where that still fits, rather than always
+        // recentering outright (a window docked to a corner stays
+        // docked to the analogous corner) - see
+        // RelocateRectToMonitor()'s comment.
+        Rect fromArea = sourceMonitor ? sourceMonitor->WorkArea() : target.WorkArea();
+        Rect relocated = RelocateRectToMonitor(window->Geometry(), fromArea, target.WorkArea());
+
+        window->SetGeometry(relocated);
+        window->SetFloatingGeometry(relocated);
+    }
+    // else: doesn't occupy a tree slot and isn't floating (e.g. a
+    // scratchpad window, which ToggleScratchpadForFocused() handles
+    // entirely on its own) - workspace/monitor bookkeeping only above
+    // is all that's needed.
+
+    // No manual unmap here - see the matching comment in
+    // MoveFocusedToWorkspace(): Arrange() unmaps/maps everything based
+    // on which workspaces are visible *after* the move, which for a
+    // monitor move is unconditionally true for the destination (it's
+    // that monitor's own ActiveWorkspace() by construction) and
+    // depends on the source's own remaining state for the source.
+    Arrange();
+
+    // Focus stays on the source monitor (refocusing whatever's left
+    // there, exactly like closing/moving-to-workspace a focused window
+    // already does) rather than following the window across - matches
+    // i3/bspwm's "move container to output" convention of not stealing
+    // focus onto the destination just because something was thrown
+    // over to it.
+    if (sourceMonitor)
+        FocusNextAvailableOn(*sourceMonitor);
 }
 
 void WindowManager::ToggleFloating()
@@ -1331,9 +1798,10 @@ void WindowManager::ToggleFloating()
     if (window->IsScratchpad())
     {
         // Release it from the scratchpad slot into an ordinary
-        // floating window on the current workspace.
+        // floating window on the focused monitor's current workspace.
         m_scratchpad.Forget(window->Id());
-        window->SetWorkspace(m_workspaces.CurrentId());
+        window->SetWorkspace(FocusedWorkspaceId());
+        window->SetMonitor(FocusedMonitor().Id());
         window->SetState(WindowState::Floating);
         m_bar.SetScratchpadActive(false);
     }
@@ -1344,7 +1812,7 @@ void WindowManager::ToggleFloating()
         Rect geometry = window->FloatingGeometry();
 
         if (geometry.width <= 0 || geometry.height <= 0)
-            geometry = CenteredFloatingRect(0.5f, 0.5f);
+            geometry = CenteredFloatingRect(FocusedMonitor(), 0.5f, 0.5f);
 
         window->SetGeometry(geometry);
         window->SetFloatingGeometry(geometry);
@@ -1354,7 +1822,10 @@ void WindowManager::ToggleFloating()
     {
         window->SetFloatingGeometry(window->Geometry());
 
-        if (!TryTile(window, window->Workspace()))
+        Monitor* shownOn = MonitorShowing(window->Workspace());
+        Monitor& referenceMonitor = shownOn ? *shownOn : FocusedMonitor();
+
+        if (!TryTile(window, window->Workspace(), referenceMonitor))
         {
             // No room to tile it right now (bug #4's capacity check) -
             // simplest safe behaviour is to just leave it floating
@@ -1425,8 +1896,16 @@ void WindowManager::ToggleScratchpadForFocused()
         float widthFraction  = m_config.GetPercent("scratchpad.width",  0.7f);
         float heightFraction = m_config.GetPercent("scratchpad.height", 0.7f);
 
-        Rect geometry = CenteredFloatingRect(widthFraction, heightFraction);
+        // The scratchpad is global - reachable from any workspace on
+        // any monitor - so unlike an ordinary floating window it has
+        // no "own" monitor to remember between toggles; it simply
+        // reappears whichever monitor the user is actually on right
+        // now, every time.
+        Monitor& monitor = FocusedMonitor();
+
+        Rect geometry = CenteredFloatingRect(monitor, widthFraction, heightFraction);
         window->SetGeometry(geometry);
+        window->SetMonitor(monitor.Id());
 
         m_connection.MoveResizeWindow(window->Id(), geometry);
         m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
@@ -1508,6 +1987,7 @@ void WindowManager::ReloadConfig()
     m_mouse.Configure(m_config);
 
     m_windowRules = LoadWindowRules(m_config);
+    m_monitors.SetRules(LoadMonitorRules(m_config));
 
     m_fileManager =
         m_config.GetString(
@@ -1692,7 +2172,7 @@ void WindowManager::RestoreFocusAfterModal()
     m_focusBeforeModal = 0;
 }
 
-bool WindowManager::TryTile(ManagedWindow* window, int workspaceId)
+bool WindowManager::TryTile(ManagedWindow* window, int workspaceId, Monitor& referenceMonitor)
 {
     if (!window || workspaceId < 1 || workspaceId > m_workspaces.Count())
         return false;
@@ -1712,7 +2192,7 @@ bool WindowManager::TryTile(ManagedWindow* window, int workspaceId)
     // Matches LayoutEngine::Apply's own Shrunk(outerGap) exactly, so
     // this and the real layout can never disagree about what a
     // freshly-split leaf's rect would be.
-    Rect tilingArea = TilingArea().Shrunk(outerGap);
+    Rect tilingArea = TilingArea(referenceMonitor).Shrunk(outerGap);
 
     // BSPTree::Insert()'s placement-aware overload is the single
     // choke point for "Try Current Layout -> Try Alternative Layouts
@@ -1730,25 +2210,26 @@ bool WindowManager::TryTile(ManagedWindow* window, int workspaceId)
     // a previous tile.
     window->ResetTilingMisbehavior();
 
-    // Arrange() (called by every caller of TryTile() right after) only
-    // ever lays out the *current* workspace - for any other, keep its
-    // cached node geometry fresh ourselves so the next insertion's
-    // AnchorLeaf()/DirectionForRect() has something real to work from
-    // instead of a stale {0,0,0,0}.
-    if (workspaceId != m_workspaces.CurrentId())
-        RefreshWorkspaceGeometry(workspaceId);
+    // ArrangeMonitor() (called by every caller of TryTile() right
+    // after, via Arrange()) only ever lays out a workspace that
+    // actually IS some monitor's ActiveWorkspace() right now - for any
+    // other, keep its cached node geometry fresh ourselves so the next
+    // insertion's AnchorLeaf()/DirectionForRect() has something real
+    // to work from instead of a stale {0,0,0,0}.
+    if (!IsWorkspaceVisible(workspaceId))
+        RefreshWorkspaceGeometry(workspaceId, referenceMonitor);
 
     return true;
 }
 
-int WindowManager::FindWorkspaceWithRoom(ManagedWindow* window, int excludeId)
+int WindowManager::FindWorkspaceWithRoom(ManagedWindow* window, int excludeId, Monitor& referenceMonitor)
 {
     int innerGap  = m_config.GetInt("general.inner_gap", 6);
     int outerGap  = m_config.GetInt("general.outer_gap", 8);
     int floorWidth  = m_config.GetInt("general.min_tile_width", 100);
     int floorHeight = m_config.GetInt("general.min_tile_height", 60);
 
-    Rect tilingArea = TilingArea().Shrunk(outerGap);
+    Rect tilingArea = TilingArea(referenceMonitor).Shrunk(outerGap);
 
     for (int id = 1; id <= m_workspaces.Count(); ++id)
     {
@@ -1819,10 +2300,13 @@ void WindowManager::ApplyTilingMisbehaviorFallback(ManagedWindow* window)
     window->SetWorkspace(targetWorkspace);
     window->SetState(WindowState::Floating);
 
+    Monitor* shownOn = MonitorShowing(targetWorkspace);
+    Monitor& referenceMonitor = shownOn ? *shownOn : (MonitorShowing(oldWorkspace) ? *MonitorShowing(oldWorkspace) : FocusedMonitor());
+
     XWindowAttributes attrs{};
     m_connection.GetWindowAttributes(window->Id(), attrs);
 
-    Rect geometry = CenteredFloatingRectForWindow(window->Id(), attrs);
+    Rect geometry = CenteredFloatingRectForWindow(window->Id(), attrs, referenceMonitor);
     window->SetGeometry(geometry);
     window->SetFloatingGeometry(geometry);
 
@@ -1836,16 +2320,9 @@ void WindowManager::ApplyTilingMisbehaviorFallback(ManagedWindow* window)
             : "") +
         " instead of continuing to force it back into a tile.");
 
-    // Moving off the workspace that's actually on screen right now
-    // needs the same unmap-on-move handling MoveFocusedToWorkspace()
-    // uses; staying on the same workspace, or moving off one that
-    // isn't current anyway, needs no extra unmap.
-    if (targetWorkspace != oldWorkspace && oldWorkspace == m_workspaces.CurrentId())
-    {
-        window->IgnoreNextUnmap();
-        m_connection.UnmapWindow(window->Id());
-    }
-
+    // No manual unmap here - Arrange() (below) unmaps anything left on
+    // a workspace nothing is currently showing on its own; see the
+    // matching comment in MoveFocusedToWorkspace().
     Arrange();
 }
 
@@ -1860,23 +2337,24 @@ void WindowManager::RefreshBorderColor(ManagedWindow* window)
     m_connection.SetBorderColor(window->Id(), window->Focused() ? activeColor : inactiveColor);
 }
 
-Rect WindowManager::CenteredFloatingRect(float widthFraction, float heightFraction)
+Rect WindowManager::CenteredFloatingRect(Monitor& monitor, float widthFraction, float heightFraction)
 {
-    const Rect& monitor = m_monitors.Primary().Geometry();
+    const Rect& geometry = monitor.WorkArea();
     int borderWidth = m_config.GetInt("general.border_size", 2);
 
     Rect rect;
-    rect.width  = static_cast<int>(static_cast<float>(monitor.width)  * widthFraction);
-    rect.height = static_cast<int>(static_cast<float>(monitor.height) * heightFraction);
-    rect.x = monitor.x + (monitor.width  - rect.width)  / 2;
-    rect.y = monitor.y + (monitor.height - rect.height) / 2;
+    rect.width  = static_cast<int>(static_cast<float>(geometry.width)  * widthFraction);
+    rect.height = static_cast<int>(static_cast<float>(geometry.height) * heightFraction);
+    rect.x = geometry.x + (geometry.width  - rect.width)  / 2;
+    rect.y = geometry.y + (geometry.height - rect.height) / 2;
 
-    return rect.ClampedTo(monitor, borderWidth);
+    return rect.ClampedTo(geometry, borderWidth);
 }
 
 Rect WindowManager::CenteredFloatingRectForWindow(
     WindowID id,
     const XWindowAttributes& attrs,
+    Monitor& monitor,
     ManagedWindow* parent)
 {
     int width = 0;
@@ -1897,7 +2375,7 @@ Rect WindowManager::CenteredFloatingRectForWindow(
         height = attrs.height;
     }
 
-    const Rect& monitor = m_monitors.Primary().Geometry();
+    const Rect& geometry = monitor.WorkArea();
     int borderWidth = m_config.GetInt("general.border_size", 2);
 
     // A handful of windows genuinely don't have any usable size to go
@@ -1909,15 +2387,15 @@ Rect WindowManager::CenteredFloatingRectForWindow(
     if (width < 50 || height < 30)
     {
         if (!parent)
-            return CenteredFloatingRect(0.5f, 0.5f);
+            return CenteredFloatingRect(monitor, 0.5f, 0.5f);
 
         Rect rect;
-        rect.width  = static_cast<int>(static_cast<float>(monitor.width)  * 0.5f);
-        rect.height = static_cast<int>(static_cast<float>(monitor.height) * 0.5f);
+        rect.width  = static_cast<int>(static_cast<float>(geometry.width)  * 0.5f);
+        rect.height = static_cast<int>(static_cast<float>(geometry.height) * 0.5f);
         rect.x = parent->Geometry().CenterX() - rect.width  / 2;
         rect.y = parent->Geometry().CenterY() - rect.height / 2;
 
-        return rect.ClampedTo(monitor, borderWidth);
+        return rect.ClampedTo(geometry, borderWidth);
     }
 
     // Never let a window's own idea of its size push it off-screen -
@@ -1928,8 +2406,8 @@ Rect WindowManager::CenteredFloatingRectForWindow(
     // outward from width/height - as the actual Geometry Rules
     // guarantee that must hold no matter what a misbehaving client's
     // own hints claimed.
-    int maxWidth  = static_cast<int>(static_cast<float>(monitor.width)  * 0.95f);
-    int maxHeight = static_cast<int>(static_cast<float>(monitor.height) * 0.95f);
+    int maxWidth  = static_cast<int>(static_cast<float>(geometry.width)  * 0.95f);
+    int maxHeight = static_cast<int>(static_cast<float>(geometry.height) * 0.95f);
 
     if (width  > maxWidth)  width  = maxWidth;
     if (height > maxHeight) height = maxHeight;
@@ -1952,11 +2430,108 @@ Rect WindowManager::CenteredFloatingRectForWindow(
     }
     else
     {
-        rect.x = monitor.x + (monitor.width  - width)  / 2;
-        rect.y = monitor.y + (monitor.height - height) / 2;
+        rect.x = geometry.x + (geometry.width  - width)  / 2;
+        rect.y = geometry.y + (geometry.height - height) / 2;
     }
 
-    return rect.ClampedTo(monitor, borderWidth);
+    return rect.ClampedTo(geometry, borderWidth);
+}
+
+Rect WindowManager::RelocateRectToMonitor(
+    const Rect& rect,
+    const Rect& fromArea,
+    const Rect& toArea) const
+{
+    int borderWidth = m_config.GetInt("general.border_size", 2);
+
+    if (fromArea.width <= 0 || fromArea.height <= 0)
+    {
+        // No sane "from" to compute a relative position against -
+        // just center it on the destination instead of dividing by
+        // zero.
+        Rect centered;
+        centered.width  = std::min(rect.width,  toArea.width);
+        centered.height = std::min(rect.height, toArea.height);
+        centered.x = toArea.x + (toArea.width  - centered.width)  / 2;
+        centered.y = toArea.y + (toArea.height - centered.height) / 2;
+
+        return centered.ClampedTo(toArea, borderWidth);
+    }
+
+    // Keep the same position/size *relative* to each monitor's own
+    // work area - a window sitting in the top-right quarter of a
+    // 1920x1080 monitor ends up in the top-right quarter of whatever
+    // it's relocated to as well, rather than always snapping back to
+    // dead center. Size is carried across proportionally too, so a
+    // window sized for a 4K monitor doesn't swallow an entire 1080p
+    // one whole.
+    float relX = static_cast<float>(rect.x - fromArea.x) / static_cast<float>(fromArea.width);
+    float relY = static_cast<float>(rect.y - fromArea.y) / static_cast<float>(fromArea.height);
+    float relW = static_cast<float>(rect.width)  / static_cast<float>(fromArea.width);
+    float relH = static_cast<float>(rect.height) / static_cast<float>(fromArea.height);
+
+    Rect relocated;
+    relocated.width  = std::clamp(static_cast<int>(relW * static_cast<float>(toArea.width)),  1, toArea.width);
+    relocated.height = std::clamp(static_cast<int>(relH * static_cast<float>(toArea.height)), 1, toArea.height);
+    relocated.x = toArea.x + static_cast<int>(relX * static_cast<float>(toArea.width));
+    relocated.y = toArea.y + static_cast<int>(relY * static_cast<float>(toArea.height));
+
+    return relocated.ClampedTo(toArea, borderWidth);
+}
+
+void WindowManager::RelocateOrphanedFloatingWindows()
+{
+    for (ManagedWindow* window : m_repository.All())
+    {
+        bool floatingLike =
+            window->IsFloating() ||
+            (window->IsFullscreen() && window->PreviousState() == WindowState::Floating);
+
+        if (!floatingLike)
+            continue; // a tiled (or fullscreen-while-tiled) window's tree ratios adapt to whatever monitor lays it out - nothing to fix
+
+        Point center(window->Geometry().CenterX(), window->Geometry().CenterY());
+
+        if (m_monitors.Containing(center))
+            continue; // still lands on some connected monitor - leave it exactly where it was
+
+        Monitor* home = MonitorShowing(window->Workspace());
+        Monitor& target = home ? *home : m_monitors.Primary();
+
+        // Same flat default every other "couldn't figure out anything
+        // better" floating placement in this file falls back to.
+        Rect geometry = CenteredFloatingRect(target, 0.5f, 0.5f);
+
+        // A genuinely client-sized rect (not just the 50/50 fallback
+        // above) is worth preserving if it still fits the destination
+        // monitor - only fall back to the flat default when it
+        // wouldn't.
+        const Rect& workArea = target.WorkArea();
+
+        if (window->Geometry().width <= workArea.width && window->Geometry().height <= workArea.height)
+        {
+            Rect resized = window->Geometry();
+            resized.x = workArea.x + (workArea.width  - resized.width)  / 2;
+            resized.y = workArea.y + (workArea.height - resized.height) / 2;
+            geometry = resized.ClampedTo(workArea, m_config.GetInt("general.border_size", 2));
+        }
+
+        window->SetGeometry(geometry);
+        window->SetFloatingGeometry(geometry);
+
+        Logger::Info(
+            "Window " + std::to_string(static_cast<unsigned long>(window->Id())) +
+            (window->ClassName().empty() ? "" : " (" + window->ClassName() + ")") +
+            " was floating on a monitor that just disconnected - relocated onto monitor " +
+            std::to_string(target.Id()) + " instead.");
+    }
+}
+
+void WindowManager::HandleMonitorTopologyChanged()
+{
+    RefreshMonitorWorkAreas();
+    RelocateOrphanedFloatingWindows();
+    Arrange();
 }
 
 WindowRuleEffect WindowManager::ResolveWindowRules(
@@ -2049,11 +2624,21 @@ std::string WindowManager::DumpMonitorsJson() const
         first = false;
 
         const Rect& r = monitor->Geometry();
+        const Rect& w = monitor->WorkArea();
+        Workspace* workspace = monitor->ActiveWorkspace();
 
         out << "{"
             << "\"id\":" << monitor->Id() << ","
+            << "\"name\":" << Json::String(monitor->Name()) << ","
             << "\"x\":" << r.x << ",\"y\":" << r.y
-            << ",\"width\":" << r.width << ",\"height\":" << r.height
+            << ",\"width\":" << r.width << ",\"height\":" << r.height << ","
+            << "\"workArea\":{"
+                << "\"x\":" << w.x << ",\"y\":" << w.y
+                << ",\"width\":" << w.width << ",\"height\":" << w.height
+            << "},"
+            << "\"workspace\":" << (workspace ? workspace->Id() : 0) << ","
+            << "\"primary\":" << Json::Boolean(monitor.get() == &m_monitors.Primary()) << ","
+            << "\"focused\":" << Json::Boolean(monitor.get() == m_monitors.Focused())
             << "}";
     }
 
