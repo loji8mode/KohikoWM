@@ -182,6 +182,27 @@ private:
     bool TryTile(ManagedWindow* window, int workspaceId);
     int FindWorkspaceWithRoom(ManagedWindow* window, int excludeId);
 
+    // `new_workspace` fallback destination: whichever *other*
+    // workspace currently has the fewest windows on it (ties broken
+    // by lowest id) - unlike FindWorkspaceWithRoom() above, this
+    // doesn't care whether that workspace has tiling capacity, since
+    // the whole point of this fallback is landing the window
+    // somewhere floating, not necessarily tiled. Returns 0 if
+    // `excludeId` is the only workspace that exists.
+    int FindWorkspaceWithFewestWindows(int excludeId);
+
+    // Called once a window's TilingMisbehaviorCount() reaches
+    // general.tiling_misbehavior_threshold: pulls it out of its
+    // workspace's BSP tree (if it's in one) and lands it floating -
+    // on the same workspace, or on whichever has the fewest windows,
+    // per general.tiling_misbehavior_fallback - and never puts it
+    // back into any tile as part of this call. That last part is
+    // deliberate: a window that's already proven it fights tiled
+    // geometry would just as easily fight a *different* tile, so
+    // unlike Manage()'s own "nowhere had room" fallback, this one
+    // always floats rather than trying TryTile() again anywhere.
+    void ApplyTilingMisbehaviorFallback(ManagedWindow* window);
+
     // Recomputes and applies `window`'s border colour from its own
     // current focused/unfocused state - shared by Focus() (repainting
     // every window's border after a focus change) and the Swap-drag

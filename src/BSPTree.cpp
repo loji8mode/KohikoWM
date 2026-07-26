@@ -74,6 +74,74 @@ void BSPTree::Insert(ManagedWindow* window)
 
     SplitDirection direction = DirectionForRect(anchor->Geometry());
 
+    SpliceIn(window, anchor, direction);
+}
+
+bool BSPTree::Insert(
+    ManagedWindow* window,
+    const Rect& tilingArea,
+    int innerGap,
+    int floorWidth,
+    int floorHeight)
+{
+    if (!window)
+        return false;
+
+    if (!m_root)
+    {
+        auto leaf = std::make_unique<BSPLeaf>(window);
+        m_lastFocused = leaf.get();
+        m_root = std::move(leaf);
+        return true; // the first window on a workspace always fits
+    }
+
+    BSPLeaf* anchor = AnchorLeaf();
+
+    if (!anchor)
+        return false;
+
+    Rect anchorRect;
+
+    if (!ComputeLeafGeometry(m_root.get(), anchor, tilingArea, innerGap, anchorRect))
+        return false; // unreachable in practice - anchor always comes from this same tree
+
+    int anchorMinWidth;
+    int anchorMinHeight;
+    EffectiveMinSize(anchor->Window(), floorWidth, floorHeight, anchorMinWidth, anchorMinHeight);
+
+    int newMinWidth;
+    int newMinHeight;
+    EffectiveMinSize(window, floorWidth, floorHeight, newMinWidth, newMinHeight);
+
+    SplitDirection direction;
+
+    if (!FeasibleSplitDirection(
+            anchorRect, innerGap,
+            anchorMinWidth, anchorMinHeight,
+            newMinWidth, newMinHeight,
+            direction))
+    {
+        std::vector<std::pair<BSPSplit*, float>> steps;
+
+        if (!PlanReclaim(anchor, window, tilingArea, innerGap, floorWidth, floorHeight, direction, steps))
+            return false; // no placement anywhere along this anchor's ancestor chain
+
+        // Apply every ratio change the plan needs - shrinking other
+        // tiles, but never below their own effective minimum anywhere,
+        // exactly as PlanReclaim() already verified.
+        for (auto& step : steps)
+            step.first->SetRatio(step.second);
+    }
+
+    SpliceIn(window, anchor, direction);
+    return true;
+}
+
+void BSPTree::SpliceIn(
+    ManagedWindow* window,
+    BSPLeaf* anchor,
+    SplitDirection direction)
+{
     auto newSplit = std::make_unique<BSPSplit>(direction);
     auto newLeaf  = std::make_unique<BSPLeaf>(window);
 
@@ -378,10 +446,11 @@ ManagedWindow* BSPTree::HitTest(const Point& p) const
 }
 
 bool BSPTree::HasSpaceForAnotherWindow(
+    ManagedWindow* window,
     const Rect& tilingArea,
     int innerGap,
-    int minWidth,
-    int minHeight) const
+    int floorWidth,
+    int floorHeight) const
 {
     if (!m_root)
         return true; // first window on this workspace always fits
@@ -396,16 +465,31 @@ bool BSPTree::HasSpaceForAnotherWindow(
     if (!ComputeLeafGeometry(m_root.get(), anchor, tilingArea, innerGap, anchorRect))
         return true; // couldn't locate the anchor - don't block insertion over it
 
-    // Mirrors exactly what Insert() is about to do: wrap the anchor in
-    // a brand-new 50/50 split, oriented from its current aspect ratio.
-    BSPSplit probe(DirectionForRect(anchorRect));
+    int anchorMinWidth;
+    int anchorMinHeight;
+    EffectiveMinSize(anchor->Window(), floorWidth, floorHeight, anchorMinWidth, anchorMinHeight);
 
-    Rect first;
-    Rect second;
-    probe.Subdivide(anchorRect, innerGap, first, second);
+    int newMinWidth;
+    int newMinHeight;
+    EffectiveMinSize(window, floorWidth, floorHeight, newMinWidth, newMinHeight);
 
-    return first.width  >= minWidth  && first.height  >= minHeight &&
-           second.width >= minWidth  && second.height >= minHeight;
+    SplitDirection direction;
+
+    if (FeasibleSplitDirection(
+            anchorRect, innerGap,
+            anchorMinWidth, anchorMinHeight,
+            newMinWidth, newMinHeight,
+            direction))
+        return true;
+
+    // The straightforward split doesn't fit either way - see whether
+    // shrinking other tiles (PlanReclaim(), never below their own
+    // effective minimum anywhere) would free up enough room. Read-only:
+    // this is a probe, so any plan found here is simply discarded
+    // rather than applied.
+    std::vector<std::pair<BSPSplit*, float>> steps;
+
+    return PlanReclaim(anchor, window, tilingArea, innerGap, floorWidth, floorHeight, direction, steps);
 }
 
 std::string BSPTree::Serialize() const
@@ -456,16 +540,121 @@ bool BSPTree::ComputeLeafGeometry(
     int innerGap,
     Rect& out) const
 {
+    return ComputeNodeGeometry(node, target, area, innerGap, out);
+}
+
+bool BSPTree::ComputeNodeGeometry(
+    BSPNode* node,
+    BSPNode* target,
+    const Rect& area,
+    int innerGap,
+    Rect& out) const
+{
     if (!node)
         return false;
 
-    if (node->IsLeaf())
+    if (node == target)
     {
-        if (node != target)
-            return false;
-
         out = area;
         return true;
+    }
+
+    if (node->IsLeaf())
+        return false; // a leaf has no children - `target` isn't under it
+
+    auto* split = static_cast<BSPSplit*>(node);
+
+    Rect first;
+    Rect second;
+    split->Subdivide(area, innerGap, first, second);
+
+    if (ComputeNodeGeometry(split->Left(), target, first, innerGap, out))
+        return true;
+
+    return ComputeNodeGeometry(split->Right(), target, second, innerGap, out);
+}
+
+void BSPTree::EffectiveMinSize(
+    ManagedWindow* window,
+    int floorWidth,
+    int floorHeight,
+    int& outMinWidth,
+    int& outMinHeight)
+{
+    outMinWidth  = floorWidth;
+    outMinHeight = floorHeight;
+
+    if (window)
+    {
+        // MinWidth()/MinHeight() default to 0 when a client never
+        // declared WM_NORMAL_HINTS, so max() here just falls through
+        // to the floor for the (very common) case of no declared
+        // preference, and only raises the bar when it actually
+        // declared something stricter than the floor.
+        outMinWidth  = std::max(outMinWidth,  window->MinWidth());
+        outMinHeight = std::max(outMinHeight, window->MinHeight());
+    }
+}
+
+bool BSPTree::FeasibleSplitDirection(
+    const Rect& rect,
+    int innerGap,
+    int firstMinWidth,
+    int firstMinHeight,
+    int secondMinWidth,
+    int secondMinHeight,
+    SplitDirection& outDirection)
+{
+    SplitDirection natural = DirectionForRect(rect);
+    SplitDirection alternate =
+        (natural == SplitDirection::Vertical) ? SplitDirection::Horizontal : SplitDirection::Vertical;
+
+    auto fits = [&](SplitDirection dir)
+    {
+        BSPSplit probe(dir);
+
+        Rect first;
+        Rect second;
+        probe.Subdivide(rect, innerGap, first, second);
+
+        return first.width   >= firstMinWidth  && first.height  >= firstMinHeight &&
+               second.width  >= secondMinWidth && second.height >= secondMinHeight;
+    };
+
+    if (fits(natural))
+    {
+        outDirection = natural;
+        return true;
+    }
+
+    if (fits(alternate))
+    {
+        outDirection = alternate;
+        return true;
+    }
+
+    return false;
+}
+
+bool BSPTree::SubtreeFits(
+    BSPNode* node,
+    const Rect& area,
+    int innerGap,
+    int floorWidth,
+    int floorHeight)
+{
+    if (!node)
+        return true; // nothing here - trivially fine
+
+    if (node->IsLeaf())
+    {
+        auto* leaf = static_cast<BSPLeaf*>(node);
+
+        int minWidth;
+        int minHeight;
+        EffectiveMinSize(leaf->Window(), floorWidth, floorHeight, minWidth, minHeight);
+
+        return area.width >= minWidth && area.height >= minHeight;
     }
 
     auto* split = static_cast<BSPSplit*>(node);
@@ -474,10 +663,145 @@ bool BSPTree::ComputeLeafGeometry(
     Rect second;
     split->Subdivide(area, innerGap, first, second);
 
-    if (ComputeLeafGeometry(split->Left(), target, first, innerGap, out))
-        return true;
+    return SubtreeFits(split->Left(),  first,  innerGap, floorWidth, floorHeight) &&
+           SubtreeFits(split->Right(), second, innerGap, floorWidth, floorHeight);
+}
 
-    return ComputeLeafGeometry(split->Right(), target, second, innerGap, out);
+bool BSPTree::PlanReclaim(
+    BSPLeaf* leaf,
+    ManagedWindow* window,
+    const Rect& tilingArea,
+    int innerGap,
+    int floorWidth,
+    int floorHeight,
+    SplitDirection& outDirection,
+    std::vector<std::pair<BSPSplit*, float>>& outSteps) const
+{
+    outSteps.clear();
+
+    int anchorMinWidth;
+    int anchorMinHeight;
+    EffectiveMinSize(leaf->Window(), floorWidth, floorHeight, anchorMinWidth, anchorMinHeight);
+
+    int newMinWidth;
+    int newMinHeight;
+    EffectiveMinSize(window, floorWidth, floorHeight, newMinWidth, newMinHeight);
+
+    // The ancestor chain from `leaf` up to the root, nearest first,
+    // remembering at each level which side `leaf` descends through -
+    // that's the side every step below tries to grow, at the expense
+    // of whatever's on the *other* side of that same split.
+    struct Step
+    {
+        BSPSplit* split;
+        bool anchorIsLeft;
+    };
+
+    std::vector<Step> chain;
+
+    BSPNode* cursor = leaf;
+    BSPSplit* parent = leaf->Parent();
+
+    while (parent != nullptr)
+    {
+        chain.push_back({parent, parent->Left() == cursor});
+        cursor = parent;
+        parent = parent->Parent();
+    }
+
+    // Try progressively wider "reclaim scopes": first squeeze only
+    // `leaf`'s immediate sibling, then - if that's still not enough -
+    // also squeeze the next split up, and so on to the root. Each
+    // level's ratio, once chosen, stays fixed while wider levels are
+    // tried, so nearer (smaller, less disruptive) squeezes always win
+    // out over farther ones whenever either alone would do.
+    for (std::size_t i = 0; i < chain.size(); ++i)
+    {
+        BSPSplit* split = chain[i].split;
+        bool anchorIsLeft = chain[i].anchorIsLeft;
+
+        // This split's own rect, using every real (unmodified) ratio
+        // above it - none of the overrides chosen in earlier
+        // iterations touch anything above `split`, only nodes
+        // strictly between it and `leaf`.
+        Rect splitRect;
+
+        if (!ComputeNodeGeometry(m_root.get(), split, tilingArea, innerGap, splitRect))
+            return false; // unreachable - `split` is definitely somewhere under m_root
+
+        float currentRatio = split->Ratio();
+        float extreme = anchorIsLeft ? 0.95f : 0.05f;
+
+        BSPNode* siblingNode = anchorIsLeft ? split->Right() : split->Left();
+
+        // Bisect on how far toward `extreme` this split's ratio can
+        // move (t=0 -> stay exactly where it is - always feasible,
+        // it's the real current tree; t=1 -> all the way to
+        // `extreme`) before the shrinking sibling side stops meeting
+        // its own effective minimum (floorWidth x floorHeight, or a
+        // leaf's own larger declared minimum) somewhere inside it.
+        // Subdivide() is linear in ratio, so feasibility is monotonic
+        // in t and plain bisection is exact enough at pixel
+        // granularity well within the fixed iteration count below.
+        float loT = 0.0f;
+        float hiT = 1.0f;
+
+        for (int iter = 0; iter < 24; ++iter)
+        {
+            float midT = (loT + hiT) * 0.5f;
+            float ratio = currentRatio + midT * (extreme - currentRatio);
+
+            BSPSplit probe(split->Direction());
+            probe.SetRatio(ratio);
+
+            Rect first;
+            Rect second;
+            probe.Subdivide(splitRect, innerGap, first, second);
+
+            Rect siblingRect = anchorIsLeft ? second : first;
+
+            if (SubtreeFits(siblingNode, siblingRect, innerGap, floorWidth, floorHeight))
+                loT = midT;
+            else
+                hiT = midT;
+        }
+
+        float bestRatio = currentRatio + loT * (extreme - currentRatio);
+
+        outSteps.push_back({split, bestRatio});
+
+        // Walk back down from `split` to `leaf` - applying this
+        // level's just-chosen ratio plus every nearer one already in
+        // outSteps - to see whether `leaf` would now be big enough to
+        // split.
+        Rect current = splitRect;
+
+        for (std::size_t idx = i + 1; idx-- > 0; )
+        {
+            BSPSplit* s = chain[idx].split;
+            bool aLeft = chain[idx].anchorIsLeft;
+            float ratio = outSteps[idx].second;
+
+            BSPSplit probe(s->Direction());
+            probe.SetRatio(ratio);
+
+            Rect first;
+            Rect second;
+            probe.Subdivide(current, innerGap, first, second);
+
+            current = aLeft ? first : second;
+        }
+
+        if (FeasibleSplitDirection(
+                current, innerGap,
+                anchorMinWidth, anchorMinHeight,
+                newMinWidth, newMinHeight,
+                outDirection))
+            return true; // outSteps (indices 0..i) is the plan to apply
+    }
+
+    outSteps.clear();
+    return false;
 }
 
 SplitDirection BSPTree::DirectionForRect(const Rect& rect)

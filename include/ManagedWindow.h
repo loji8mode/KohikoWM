@@ -151,6 +151,22 @@ public:
     int MinWidth() const;
     int MinHeight() const;
 
+    // How many times, in a row since this window was last (re-)tiled,
+    // its own ConfigureRequest has asked for geometry different from
+    // the fixed tile Kohiko actually gave it - WindowManager's proxy
+    // signal for "this client is fighting tiled geometry" (repeated
+    // resize attempts, repeated ConfigureRequest loops - see
+    // general.tiling_misbehavior_threshold/fallback in the README).
+    // Reset to 0 by ResetTilingMisbehavior() whenever this window is
+    // freshly tiled or the fallback actually fires, so the count
+    // always reflects how it's behaving *right now*, not some earlier
+    // tile it may have already been moved out of.
+    void RegisterTilingMisbehavior();
+
+    void ResetTilingMisbehavior();
+
+    int TilingMisbehaviorCount() const;
+
     // Called right before WindowManager unmaps this window itself
     // (workspace switch, scratchpad hide) so the resulting UnmapNotify
     // isn't mistaken for the client withdrawing/closing.
@@ -185,6 +201,8 @@ private:
 
     int m_minWidth = 0;
     int m_minHeight = 0;
+
+    int m_tilingMisbehaviorCount = 0;
 
     int m_ignoredUnmaps = 0;
 

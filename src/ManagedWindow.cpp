@@ -212,6 +212,21 @@ int ManagedWindow::MinHeight() const
     return m_minHeight;
 }
 
+void ManagedWindow::RegisterTilingMisbehavior()
+{
+    ++m_tilingMisbehaviorCount;
+}
+
+void ManagedWindow::ResetTilingMisbehavior()
+{
+    m_tilingMisbehaviorCount = 0;
+}
+
+int ManagedWindow::TilingMisbehaviorCount() const
+{
+    return m_tilingMisbehaviorCount;
+}
+
 void ManagedWindow::IgnoreNextUnmap()
 {
     ++m_ignoredUnmaps;

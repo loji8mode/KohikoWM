@@ -36,7 +36,16 @@ public:
 
 private:
 
-    void Calculate(BSPNode* node, const Rect& area, int innerGap, int borderWidth);
+    // `bounds` is the original, un-shrunk area Apply() was called
+    // with - threaded through unchanged on every recursive call so
+    // every leaf's final content rect can be defensively clamped
+    // against it (Types.h's Rect::ClampedTo()), regardless of how
+    // deeply nested that leaf is. The BSP subdivision itself is
+    // already self-consistent (see BSPSplit::Subdivide()'s comment),
+    // but this is the single choke point every tiled window's
+    // geometry passes through on the way to X11, so it's the right
+    // place to guarantee the Geometry Rules hold no matter what.
+    void Calculate(BSPNode* node, const Rect& area, int innerGap, int borderWidth, const Rect& bounds);
 
     int CountLeaves(BSPNode* node) const;
 

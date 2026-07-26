@@ -159,11 +159,36 @@ void WindowManager::HandleConfigureRequest(const XConfigureRequestEvent& event)
 
     if (!window || window->IsFloating())
     {
+        // Start from whatever this window's geometry actually is right
+        // now (falling back to the request itself if it isn't managed
+        // yet) and only overwrite the fields this particular request
+        // actually asked to change - a client resizing without moving,
+        // say, shouldn't have its untouched x/y treated as "0,0" just
+        // because CWX/CWY weren't set this time.
+        Rect requested =
+            window
+                ? window->Geometry()
+                : Rect{event.x, event.y, static_cast<int>(event.width), static_cast<int>(event.height)};
+
+        if (event.value_mask & CWX)      requested.x      = event.x;
+        if (event.value_mask & CWY)      requested.y      = event.y;
+        if (event.value_mask & CWWidth)  requested.width  = event.width;
+        if (event.value_mask & CWHeight) requested.height = event.height;
+
+        // Geometry Rule: a floating client's own ConfigureRequest is
+        // honoured - that's what makes it "floating" - but never at
+        // the cost of letting it place itself off-screen. Clamped
+        // right here, before it ever reaches X11, exactly like every
+        // other geometry-then-apply site in this file.
+        const Rect& monitor = m_monitors.Primary().Geometry();
+        int borderWidth = window ? window->BorderWidth() : static_cast<int>(event.border_width);
+        Rect clamped = requested.ClampedTo(monitor, borderWidth);
+
         XWindowChanges changes{};
-        changes.x = event.x;
-        changes.y = event.y;
-        changes.width = event.width;
-        changes.height = event.height;
+        changes.x = clamped.x;
+        changes.y = clamped.y;
+        changes.width = clamped.width;
+        changes.height = clamped.height;
         changes.border_width = event.border_width;
         changes.sibling = event.above;
         changes.stack_mode = event.detail;
@@ -172,9 +197,8 @@ void WindowManager::HandleConfigureRequest(const XConfigureRequestEvent& event)
 
         if (window)
         {
-            Rect rect{event.x, event.y, event.width, event.height};
-            window->SetGeometry(rect);
-            window->SetFloatingGeometry(rect);
+            window->SetGeometry(clamped);
+            window->SetFloatingGeometry(clamped);
         }
 
         return;
@@ -206,8 +230,30 @@ void WindowManager::HandleConfigureRequest(const XConfigureRequestEvent& event)
         ((event.value_mask & CWWidth)  && event.width  != actual.width) ||
         ((event.value_mask & CWHeight) && event.height != actual.height);
 
-    if (askedForSomethingElse)
-        m_connection.ClearArea(event.window);
+    if (!askedForSomethingElse)
+        return;
+
+    m_connection.ClearArea(event.window);
+
+    // Window Misbehavior Detection: a ConfigureRequest conflict on its
+    // own isn't proof of anything - a client resizing itself once as
+    // part of normal startup is completely ordinary. What actually
+    // indicates a client fighting its tiled geometry is this
+    // happening *repeatedly* in the same tile (repeated resize
+    // attempts / a ConfigureRequest loop), which is exactly what
+    // TilingMisbehaviorCount() accumulates - reset back to zero every
+    // time this window is freshly tiled (TryTile()) or the fallback
+    // below actually fires, so it only ever measures how the window
+    // is behaving in its *current* placement.
+    if (!window->IsTiled())
+        return; // fullscreen/scratchpad ConfigureRequest handling is unrelated to tiling fit
+
+    window->RegisterTilingMisbehavior();
+
+    int threshold = m_config.GetInt("general.tiling_misbehavior_threshold", 3);
+
+    if (threshold > 0 && window->TilingMisbehaviorCount() >= threshold)
+        ApplyTilingMisbehaviorFallback(window);
 }
 
 void WindowManager::HandleUnmapNotify(const XUnmapEvent& event)
@@ -782,25 +828,64 @@ void WindowManager::Manage(WindowID id)
         }
         else
         {
-            // Every workspace is full. This is the designated
-            // extension point for something smarter later (auto-
-            // creating a new workspace, prompting the user, etc) -
-            // for now, the fallback that actually guarantees "no
-            // window ever goes beyond the screen" is to open it
-            // floating instead of forcing an undersized tile.
-            window->SetState(WindowState::Floating);
+            // Every workspace's tiling layout is genuinely full (down
+            // to minWidth x minHeight everywhere) - what happens next
+            // is governed by general.tiling_misbehavior_fallback, the
+            // same knob ApplyTilingMisbehaviorFallback() uses. It's
+            // really the same question either way - "this window can't
+            // have fixed tiled geometry right now, where does it go
+            // instead?" - just asked at open time here rather than
+            // after the fact.
+            std::string fallback = Utils::Lower(m_config.GetString("general.tiling_misbehavior_fallback", "floating"));
 
-            Rect geometry = CenteredFloatingRectForWindow(id, attrs);
-            window->SetGeometry(geometry);
-            window->SetFloatingGeometry(geometry);
+            bool placed = false;
 
-            m_connection.MoveResizeWindow(id, geometry);
-            m_connection.SetBorderWidth(id, window->BorderWidth());
+            if (fallback == "new_workspace")
+            {
+                int target = FindWorkspaceWithFewestWindows(currentWorkspace);
 
-            Logger::Warning(
-                "No workspace has room for another tile without dropping "
-                "below the configured minimum size - opened window " +
-                std::to_string(static_cast<unsigned long>(id)) + " floating instead.");
+                if (target != 0 && target != currentWorkspace)
+                {
+                    window->SetWorkspace(target);
+                    placed = TryTile(window, target);
+
+                    if (placed)
+                    {
+                        Logger::Info(
+                            "No workspace has room for another tile without "
+                            "dropping below the configured minimum size - moved "
+                            "window " + std::to_string(static_cast<unsigned long>(id)) +
+                            " to workspace " + std::to_string(target) +
+                            " (fewest windows) instead.");
+                    }
+                    else
+                    {
+                        window->SetWorkspace(currentWorkspace);
+                    }
+                }
+            }
+
+            if (!placed)
+            {
+                // Either the fallback is "floating", or "new_workspace"
+                // genuinely had nowhere better to go either - what
+                // actually guarantees "no window ever goes beyond the
+                // screen, or gets forced into an undersized tile" is
+                // floating it instead.
+                window->SetState(WindowState::Floating);
+
+                Rect geometry = CenteredFloatingRectForWindow(id, attrs);
+                window->SetGeometry(geometry);
+                window->SetFloatingGeometry(geometry);
+
+                m_connection.MoveResizeWindow(id, geometry);
+                m_connection.SetBorderWidth(id, window->BorderWidth());
+
+                Logger::Warning(
+                    "No workspace has room for another tile without dropping "
+                    "below the configured minimum size - opened window " +
+                    std::to_string(static_cast<unsigned long>(id)) + " floating instead.");
+            }
         }
     }
 
@@ -1566,25 +1651,35 @@ bool WindowManager::TryTile(ManagedWindow* window, int workspaceId)
     int innerGap  = m_config.GetInt("general.inner_gap", 6);
     int outerGap  = m_config.GetInt("general.outer_gap", 8);
 
-    // A client that's declared its own minimum usable size (queried
-    // once in Manage(), see the comment there) needs at least that
-    // much room, not just whatever the one-size-fits-all config
-    // default allows - otherwise it gets tiled into a slot it told us
-    // outright it can't render into without clipping content.
-    int minWidth  = std::max(m_config.GetInt("general.min_tile_width", 100), window->MinWidth());
-    int minHeight = std::max(m_config.GetInt("general.min_tile_height", 60), window->MinHeight());
+    // MIN_USABLE_TILE_WIDTH/HEIGHT: the floor no *other*, already-
+    // tiled window is ever allowed to shrink past on `window`'s
+    // account. `window`'s own (possibly larger) declared minimum is
+    // handled by BSPTree::Insert() itself, via ManagedWindow::
+    // MinWidth()/MinHeight() - see BSPTree.h's EffectiveMinSize() for
+    // why the two are deliberately kept separate.
+    int floorWidth  = m_config.GetInt("general.min_tile_width", 100);
+    int floorHeight = m_config.GetInt("general.min_tile_height", 60);
 
     // Matches LayoutEngine::Apply's own Shrunk(outerGap) exactly, so
-    // this check and the real layout can never disagree about what a
+    // this and the real layout can never disagree about what a
     // freshly-split leaf's rect would be.
     Rect tilingArea = TilingArea().Shrunk(outerGap);
 
-    if (!m_workspaces.Get(workspaceId).Tree().HasSpaceForAnotherWindow(tilingArea, innerGap, minWidth, minHeight))
+    // BSPTree::Insert()'s placement-aware overload is the single
+    // choke point for "Try Current Layout -> Try Alternative Layouts
+    // -> Shrink Existing Tiles" - it only mutates the tree (and only
+    // ever down to the floor, never further) if it actually finds a
+    // legal placement, and returns false untouched otherwise.
+    if (!m_workspaces.Get(workspaceId).Tree().Insert(window, tilingArea, innerGap, floorWidth, floorHeight))
         return false;
 
     window->SetWorkspace(workspaceId);
     window->SetState(WindowState::Tiled);
-    m_workspaces.Get(workspaceId).Tree().Insert(window);
+
+    // A freshly-tiled window starts this tile's "is it fighting its
+    // geometry" count at zero, regardless of whatever it racked up in
+    // a previous tile.
+    window->ResetTilingMisbehavior();
 
     // Arrange() (called by every caller of TryTile() right after) only
     // ever lays out the *current* workspace - for any other, keep its
@@ -1601,8 +1696,8 @@ int WindowManager::FindWorkspaceWithRoom(ManagedWindow* window, int excludeId)
 {
     int innerGap  = m_config.GetInt("general.inner_gap", 6);
     int outerGap  = m_config.GetInt("general.outer_gap", 8);
-    int minWidth  = std::max(m_config.GetInt("general.min_tile_width", 100), window ? window->MinWidth() : 0);
-    int minHeight = std::max(m_config.GetInt("general.min_tile_height", 60), window ? window->MinHeight() : 0);
+    int floorWidth  = m_config.GetInt("general.min_tile_width", 100);
+    int floorHeight = m_config.GetInt("general.min_tile_height", 60);
 
     Rect tilingArea = TilingArea().Shrunk(outerGap);
 
@@ -1611,11 +1706,98 @@ int WindowManager::FindWorkspaceWithRoom(ManagedWindow* window, int excludeId)
         if (id == excludeId)
             continue;
 
-        if (m_workspaces.Get(id).Tree().HasSpaceForAnotherWindow(tilingArea, innerGap, minWidth, minHeight))
+        if (m_workspaces.Get(id).Tree().HasSpaceForAnotherWindow(window, tilingArea, innerGap, floorWidth, floorHeight))
             return id;
     }
 
     return 0;
+}
+
+int WindowManager::FindWorkspaceWithFewestWindows(int excludeId)
+{
+    int best = 0;
+    std::size_t bestCount = 0;
+
+    // Ascending id order both gives the natural "first available one"
+    // tie-break the spec asks for and makes the scan deterministic.
+    for (int id = 1; id <= m_workspaces.Count(); ++id)
+    {
+        if (id == excludeId)
+            continue;
+
+        std::size_t count = m_repository.Workspace(id).size();
+
+        if (best == 0 || count < bestCount)
+        {
+            best = id;
+            bestCount = count;
+        }
+    }
+
+    return best;
+}
+
+void WindowManager::ApplyTilingMisbehaviorFallback(ManagedWindow* window)
+{
+    if (!window)
+        return;
+
+    int oldWorkspace = window->Workspace();
+
+    // Stop assigning fixed tiled geometry entirely - remove it from
+    // the tree here and never put it back into any tile, on any
+    // workspace, as part of this call. Simply moving it into a
+    // *different* tile would leave it exactly as likely to fight that
+    // one too; the whole point of this fallback is landing it
+    // somewhere floating instead.
+    if (window->OccupiesTreeSlot())
+        m_workspaces.Get(oldWorkspace).Tree().Remove(window);
+
+    window->ResetTilingMisbehavior();
+
+    std::string fallback = Utils::Lower(m_config.GetString("general.tiling_misbehavior_fallback", "floating"));
+
+    int targetWorkspace = oldWorkspace;
+
+    if (fallback == "new_workspace")
+    {
+        int candidate = FindWorkspaceWithFewestWindows(oldWorkspace);
+
+        if (candidate != 0)
+            targetWorkspace = candidate;
+    }
+
+    window->SetWorkspace(targetWorkspace);
+    window->SetState(WindowState::Floating);
+
+    XWindowAttributes attrs{};
+    m_connection.GetWindowAttributes(window->Id(), attrs);
+
+    Rect geometry = CenteredFloatingRectForWindow(window->Id(), attrs);
+    window->SetGeometry(geometry);
+    window->SetFloatingGeometry(geometry);
+
+    Logger::Warning(
+        "Window " + std::to_string(static_cast<unsigned long>(window->Id())) +
+        (window->ClassName().empty() ? "" : " (" + window->ClassName() + ")") +
+        " repeatedly sent geometry requests conflicting with its tiled slot - "
+        "switching it to floating" +
+        (targetWorkspace != oldWorkspace
+            ? " on workspace " + std::to_string(targetWorkspace)
+            : "") +
+        " instead of continuing to force it back into a tile.");
+
+    // Moving off the workspace that's actually on screen right now
+    // needs the same unmap-on-move handling MoveFocusedToWorkspace()
+    // uses; staying on the same workspace, or moving off one that
+    // isn't current anyway, needs no extra unmap.
+    if (targetWorkspace != oldWorkspace && oldWorkspace == m_workspaces.CurrentId())
+    {
+        window->IgnoreNextUnmap();
+        m_connection.UnmapWindow(window->Id());
+    }
+
+    Arrange();
 }
 
 void WindowManager::RefreshBorderColor(ManagedWindow* window)
@@ -1632,6 +1814,7 @@ void WindowManager::RefreshBorderColor(ManagedWindow* window)
 Rect WindowManager::CenteredFloatingRect(float widthFraction, float heightFraction)
 {
     const Rect& monitor = m_monitors.Primary().Geometry();
+    int borderWidth = m_config.GetInt("general.border_size", 2);
 
     Rect rect;
     rect.width  = static_cast<int>(static_cast<float>(monitor.width)  * widthFraction);
@@ -1639,7 +1822,7 @@ Rect WindowManager::CenteredFloatingRect(float widthFraction, float heightFracti
     rect.x = monitor.x + (monitor.width  - rect.width)  / 2;
     rect.y = monitor.y + (monitor.height - rect.height) / 2;
 
-    return rect;
+    return rect.ClampedTo(monitor, borderWidth);
 }
 
 Rect WindowManager::CenteredFloatingRectForWindow(WindowID id, const XWindowAttributes& attrs)
@@ -1670,9 +1853,16 @@ Rect WindowManager::CenteredFloatingRectForWindow(WindowID id, const XWindowAttr
         return CenteredFloatingRect(0.5f, 0.5f);
 
     const Rect& monitor = m_monitors.Primary().Geometry();
+    int borderWidth = m_config.GetInt("general.border_size", 2);
 
     // Never let a window's own idea of its size push it off-screen -
-    // still centered, just clamped to comfortably fit.
+    // still centered, just clamped to comfortably fit (a soft 95% cap
+    // first, so it visibly has room to breathe rather than butting
+    // right up against the edge), then hard-clamped against the real
+    // monitor bounds - accounting for the border ClampedTo() adds
+    // outward from width/height - as the actual Geometry Rules
+    // guarantee that must hold no matter what a misbehaving client's
+    // own hints claimed.
     int maxWidth  = static_cast<int>(static_cast<float>(monitor.width)  * 0.95f);
     int maxHeight = static_cast<int>(static_cast<float>(monitor.height) * 0.95f);
 
@@ -1685,7 +1875,7 @@ Rect WindowManager::CenteredFloatingRectForWindow(WindowID id, const XWindowAttr
     rect.x = monitor.x + (monitor.width  - width)  / 2;
     rect.y = monitor.y + (monitor.height - height) / 2;
 
-    return rect;
+    return rect.ClampedTo(monitor, borderWidth);
 }
 
 WindowRuleEffect WindowManager::ResolveWindowRules(

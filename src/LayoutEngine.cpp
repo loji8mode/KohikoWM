@@ -29,14 +29,15 @@ void LayoutEngine::Apply(
 
     Rect tilingArea = area.Shrunk(outerGap);
 
-    Calculate(root, tilingArea, innerGap, border);
+    Calculate(root, tilingArea, innerGap, border, area);
 }
 
 void LayoutEngine::Calculate(
     BSPNode* node,
     const Rect& area,
     int innerGap,
-    int borderWidth)
+    int borderWidth,
+    const Rect& bounds)
 {
     // The slot rect: contiguous, gap-free, used for hit-testing and
     // directional neighbor search.
@@ -53,6 +54,11 @@ void LayoutEngine::Calculate(
             content.width  = std::max(1, area.width  - borderWidth * 2);
             content.height = std::max(1, area.height - borderWidth * 2);
 
+            // Defensive final clamp - see the comment on Calculate()'s
+            // declaration for why this exists on top of already-
+            // consistent subdivision math.
+            content = content.ClampedTo(bounds, borderWidth);
+
             window->SetGeometry(content);
             window->SetBorderWidth(borderWidth);
         }
@@ -66,8 +72,8 @@ void LayoutEngine::Calculate(
     Rect second;
     split->Subdivide(area, innerGap, first, second);
 
-    Calculate(split->Left(),  first,  innerGap, borderWidth);
-    Calculate(split->Right(), second, innerGap, borderWidth);
+    Calculate(split->Left(),  first,  innerGap, borderWidth, bounds);
+    Calculate(split->Right(), second, innerGap, borderWidth, bounds);
 }
 
 int LayoutEngine::CountLeaves(BSPNode* node) const

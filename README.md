@@ -139,8 +139,10 @@ general.border_color_active=0x89b4fa
 general.border_color_inactive=0x45475a
 general.smart_gaps=true          # gaps collapse to 0 with only one tiled window
 general.smart_borders=true       # same, for the border
-general.min_tile_width=100       # a new tile is never allowed to shrink below this...
-general.min_tile_height=60       # ...falls back to another workspace, then floating
+general.min_tile_width=100       # a new tile - or any existing one - never shrinks below this...
+general.min_tile_height=60       # ...tries the other split direction/shrinking first, then another workspace, then floating
+general.tiling_misbehavior_threshold=3    # how many conflicting resize requests in a row counts as "fighting" tiled geometry
+general.tiling_misbehavior_fallback=floating  # floating | new_workspace - where a misbehaving window goes instead
 general.bar_height=26
 general.focus_follows_mouse=true
 
@@ -471,7 +473,7 @@ Roughly the file layout the project was designed around, one responsibility each
 
 | File                       | Responsibility |
 |----------------------------|----------------|
-| `BSPTree` / `BSPNode` / `BSPLeaf` / `BSPSplit` | The tree itself: insert-next-to-focused (with a minimum-tile-size guard), remove-and-collapse, swap, resize, rotate, flip, neighbor search, hit-testing, JSON dump |
+| `BSPTree` / `BSPNode` / `BSPLeaf` / `BSPSplit` | The tree itself: placement-aware insert-next-to-focused (natural direction, then the other direction, then shrinking other tiles - never below `general.min_tile_*`), remove-and-collapse, swap, resize, rotate, flip, neighbor search, hit-testing, JSON dump |
 | `LayoutEngine`             | Walks the tree and turns ratios into pixels (gaps, borders, smart gaps/borders) |
 | `WindowManager`            | Coordinator - owns everything else, sequences the actual X11 event handling |
 | `KeyboardManager`          | Config binds -> grabbed keys -> `Command`s. No other logic. |
@@ -498,11 +500,24 @@ leaf refers to rather than touching any rect, which is what makes it safe
 to lay out again immediately afterward - `Animator` then plays that
 transition back over a couple of frames instead of applying it instantly,
 which is the only place Kohiko's "no decorative animation" rule allows
-motion at all. Before a window is ever inserted, `BSPTree::HasSpaceForAnotherWindow()`
-answers "would this shrink something below `general.min_tile_*`?" without
-mutating anything, which is what lets `WindowManager` fall back to another
-workspace (or, failing that, floating) instead of ever tiling a window
-into an unusably small space.
+motion at all.
+
+Before a window is ever inserted, `BSPTree::Insert()`'s placement-aware
+overload (and `HasSpaceForAnotherWindow()`, its non-mutating probe of the
+same logic) tries, in order: the anchor's natural split direction; the
+*other* split direction (a wide-but-shallow or tall-but-narrow anchor can
+easily fit one way and not the other); and finally shrinking other tiles
+- nearest to the anchor first, walking outward toward the root - but
+never past `general.min_tile_width/height`, or a leaf's own declared
+`WM_NORMAL_HINTS` minimum if it's larger. If none of that finds room,
+`WindowManager` falls back to another workspace or, failing that,
+floating, instead of ever tiling a window into an unusably small space.
+The same escalating logic protects tiled windows afterward, too: a
+window that keeps sending `ConfigureRequest`s asking for something other
+than the tile it was actually given (`general.tiling_misbehavior_threshold`
+in a row) gets pulled out of the tree and switched to floating -
+`general.tiling_misbehavior_fallback` - rather than being forced back
+into a tile it's already shown it won't render into correctly.
 
 ## Known limitations
 
@@ -525,3 +540,10 @@ into an unusably small space.
   Kohiko itself while other windows are already open will leave those
   specific windows unmanaged until they're reopened; this isn't new
   behaviour, just worth knowing about.
+- **`general.tiling_misbehavior_*` detects fighting via repeated,
+  conflicting `ConfigureRequest`s** (see `config/default.conf`) - the
+  only signal X11 actually gives a window manager for "this client
+  isn't happy with the geometry it was given". It can't see rendering
+  glitches directly, so a client that visually misrenders without ever
+  asking to be resized won't trip it; `windowrule=float` (or `=tile`)
+  on that specific application remains the direct fix for those.

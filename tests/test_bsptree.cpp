@@ -175,12 +175,12 @@ int main()
 
     std::printf("\n-- HasSpaceForAnotherWindow (bug #4: minimum tile size) --\n");
 
-    Check(BSPTree().HasSpaceForAnotherWindow(area, 4, 100, 60),
+    Check(BSPTree().HasSpaceForAnotherWindow(nullptr, area, 4, 100, 60),
           "a brand-new empty tree always has room for the first window");
 
-    Check(tree.HasSpaceForAnotherWindow(area, params.innerGap, 50, 50),
+    Check(tree.HasSpaceForAnotherWindow(nullptr, area, params.innerGap, 50, 50),
           "the existing 4-window 1920x1080 tree still has room for a modest 50x50 minimum");
-    Check(!tree.HasSpaceForAnotherWindow(area, params.innerGap, 2000, 2000),
+    Check(!tree.HasSpaceForAnotherWindow(nullptr, area, params.innerGap, 2000, 2000),
           "the existing 4-window tree has no room left for an unreasonably large minimum");
 
     // Precise boundary check on a tree that has *never* been laid out
@@ -200,10 +200,98 @@ int main()
     soloTree.Insert(E);
 
     Rect soloArea{0, 0, 220, 100};
-    Check(soloTree.HasSpaceForAnotherWindow(soloArea, 4, 100, 60),
+    Check(soloTree.HasSpaceForAnotherWindow(nullptr, soloArea, 4, 100, 60),
           "never-laid-out tree: 108px-wide half still clears a 100px minimum width");
-    Check(!soloTree.HasSpaceForAnotherWindow(soloArea, 4, 110, 60),
+    Check(!soloTree.HasSpaceForAnotherWindow(nullptr, soloArea, 4, 110, 60),
           "never-laid-out tree: 108px-wide half no longer clears a 110px minimum width");
+
+    std::printf("\n-- Insert() with placement (\"Try Alternative Layouts\") --\n");
+
+    // 300x310 is very slightly taller than it is wide, so
+    // DirectionForRect() picks Horizontal (split the height) as the
+    // "natural" direction - which only gives each half ~153px of the
+    // 310px height, well short of the 170px minimum height this window
+    // wants. Splitting the *other* way (Vertical, splitting the 300px
+    // width instead) leaves height untouched at 310 (>= 170) and still
+    // clears the 100px minimum width on both ~148px-wide halves - so a
+    // naive "only ever try the natural direction" implementation would
+    // wrongly refuse this insertion, even though a perfectly good
+    // placement exists one axis over.
+    ManagedWindow* F = makeWindow(6);
+    ManagedWindow* G = makeWindow(7);
+    G->SetMinSize(100, 170);
+
+    BSPTree altTree;
+    altTree.Insert(F);
+
+    Rect altArea{0, 0, 300, 310};
+
+    Check(altTree.HasSpaceForAnotherWindow(G, altArea, 4, 100, 60),
+          "HasSpaceForAnotherWindow: alternative direction rescues an anchor "
+          "that's infeasible in its own natural direction");
+    Check(altTree.Insert(G, altArea, 4, 100, 60),
+          "Insert(): the same alternative-direction placement actually succeeds");
+    Check(altTree.Count() == 2, "count == 2 after the alternative-direction insert");
+
+    layout.Apply(altTree.Root(), altArea, params);
+    Check(F->Geometry().height >= 170 && G->Geometry().height >= 170,
+          "both panes still clear G's 170px minimum height after relayout");
+    Check(F->Geometry().width >= 100 && G->Geometry().width >= 100,
+          "both panes still clear the 100px minimum width after relayout");
+
+    std::printf("\n-- Insert() with placement (\"Shrink Existing Tiles\") --\n");
+
+    // Two 250x250 panes side by side (H|I, root ratio 0.5, 4px gaps -
+    // usable = 500, so 250 each). A new window J that insists on a
+    // 300px-wide slot can't get one by splitting I alone - neither
+    // direction gives either resulting half 300px - but shrinking H
+    // down to the 100px floor frees up to 400px for I, and *that's*
+    // enough room to split Horizontally (I keeps the full 400px width,
+    // stacked panes) without ever taking H below the configured
+    // MIN_USABLE_TILE_WIDTH of 100px.
+    ManagedWindow* H = makeWindow(8);
+    ManagedWindow* I = makeWindow(9);
+    ManagedWindow* J = makeWindow(10);
+    J->SetMinSize(300, 100);
+
+    BSPTree reclaimTree;
+    reclaimTree.Insert(H);
+    reclaimTree.Insert(I); // anchor is H (only leaf so far) -> (H|I)
+
+    Rect reclaimArea{0, 0, 504, 250};
+    LayoutEngine::Params reclaimParams;
+    reclaimParams.innerGap = 4;
+    reclaimParams.outerGap = 0;
+    reclaimParams.borderWidth = 0;
+
+    layout.Apply(reclaimTree.Root(), reclaimArea, reclaimParams);
+    Check(I->Geometry().width < 300,
+          "sanity check: I's plain 50/50 share (~250px) is under J's 300px requirement");
+
+    Check(reclaimTree.HasSpaceForAnotherWindow(J, reclaimArea, 4, 100, 60),
+          "HasSpaceForAnotherWindow: shrinking H down to the 100px floor is enough to fit J");
+    Check(reclaimTree.Insert(J, reclaimArea, 4, 100, 60),
+          "Insert(): the same shrink-existing-tiles placement actually succeeds");
+    Check(reclaimTree.Count() == 3, "count == 3 after the reclaim-based insert");
+
+    layout.Apply(reclaimTree.Root(), reclaimArea, reclaimParams);
+    Check(H->Geometry().width >= 100,
+          "H was shrunk to make room, but never below the 100px floor");
+    Check(J->Geometry().width >= 300 && J->Geometry().height >= 100,
+          "J actually got the 300x100 slot it required");
+
+    // Negative case: nothing (however extreme) reclaims 600px out of a
+    // 504px-wide area - Insert() must leave the tree completely
+    // untouched rather than silently violating the floor to "make it
+    // work" anyway.
+    ManagedWindow* K = makeWindow(11);
+    K->SetMinSize(600, 100);
+
+    Check(!reclaimTree.HasSpaceForAnotherWindow(K, reclaimArea, 4, 100, 60),
+          "HasSpaceForAnotherWindow: correctly refuses a 600px requirement no reclaim can satisfy");
+    Check(!reclaimTree.Insert(K, reclaimArea, 4, 100, 60),
+          "Insert(): correctly refuses the same impossible placement, touching nothing");
+    Check(reclaimTree.Count() == 3, "count is still 3 - the failed Insert() didn't mutate the tree");
 
     std::printf("\n-- Remove (no empty nodes left behind) --\n");
 
