@@ -111,6 +111,25 @@ public:
 
     bool IsScratchpad() const;
 
+    // Whether this window still has a leaf reserved for it in its
+    // workspace's BSP tree right now - NOT the same question as
+    // IsTiled(). A window that was tiled and then went fullscreen
+    // (Super+F, a client's own EWMH request, `windowrule=fullscreen`)
+    // moves to WindowState::Fullscreen but is deliberately left in the
+    // tree exactly where it was, so toggling fullscreen back off
+    // restores it to the same spot - which means IsTiled() alone is
+    // the wrong question everywhere a caller actually needs to know
+    // "does WindowManager::Unmanage()/MoveFocusedToWorkspace()/
+    // ToggleScratchpadForFocused() need to remove a tree node for
+    // this window", since checking only IsTiled() there answers "no"
+    // for a currently-fullscreen window and leaves a stale leaf/split
+    // behind reserving its share of the screen forever (until the WM
+    // restarts) - this is what previously made a tiled window that
+    // went fullscreen right before closing (Telegram's media viewer,
+    // which asks for real fullscreen, being the case that actually
+    // surfaced it) leave permanent dead space once closed.
+    bool OccupiesTreeSlot() const;
+
     void SetBorderWidth(
         int width
     );

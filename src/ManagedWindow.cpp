@@ -178,6 +178,11 @@ bool ManagedWindow::IsScratchpad() const
     return m_state == WindowState::Scratchpad;
 }
 
+bool ManagedWindow::OccupiesTreeSlot() const
+{
+    return IsTiled() || (IsFullscreen() && m_previousState == WindowState::Tiled);
+}
+
 void ManagedWindow::SetBorderWidth(
     int width)
 {

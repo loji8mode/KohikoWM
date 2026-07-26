@@ -1,14 +1,12 @@
 # Changelog
 
-## Version 0.8.0
+## Version 0.8.1
 
 Release date: 2026-07-14
 
-### Added
-- Window rules (`windowrule=` config directive, new `WindowRule.h`/`.cpp`): lets specific applications' tiling behavior be overridden by `class:`/`instance:`/`title:` selector, with actions `float`, `tile`, `fullscreen`, `nofullscreen`, and `workspace:N`. `windowrule=` is now a third repeatable config key alongside `bind=` and `exec.<name>=`.
-- EWMH `_NET_WM_STATE_FULLSCREEN` support: Kohiko now honours a client's request for real fullscreen, whether made via a `_NET_WM_STATE` `ClientMessage` after mapping or by setting the property before being mapped, and keeps the property in sync with actual state either way. `windowrule=fullscreen`/`nofullscreen` build on this same mechanism.
-- Floating windows (automatic or via `windowrule=float`) now open centered at their own natural size (from `WM_NORMAL_HINTS`, or their size at map time) instead of a flat fraction of the screen.
-- The Launcher now stays raised above all other windows for as long as it is open, including over a window that opens while it is up, since it depends on holding real X input focus rather than an active keyboard grab.
+### Fixed
+- Fixed a bug where a tiled window that went fullscreen (either via `Super+F`, a client's own EWMH fullscreen request, or `windowrule=fullscreen`) and was then closed *while still fullscreen* left its BSP tree slot permanently reserved but empty, since the close path only checked `IsTiled()` — which is false for a fullscreen window — instead of also accounting for windows that logically still occupy a tree slot pending restoration. This produced a permanent dead/black area on screen that only a WM restart would clear. The same bug affected moving such a window to another workspace.
+- Added `ManagedWindow::OccupiesTreeSlot()` (true if a window is tiled, or is fullscreen with a previous state of tiled) and updated window-close and move-to-workspace logic to use it instead of `IsTiled()` where appropriate. A window moved to another workspace while mid-fullscreen now reserves a fresh tiled slot on the destination workspace (falling back to floating if none fits) so it can still restore correctly when un-fullscreened.
 
 ### Notes
-- Default config includes example `windowrule=` entries: `windowrule=fullscreen class:flameshot` and `windowrule=tile class:tlauncher`.
+- A regression test covering this exact scenario (two ordinary tiled windows plus a third that tiles, goes fullscreen, and is closed without un-fullscreening first) was added to `tests/test_bsptree.cpp`.

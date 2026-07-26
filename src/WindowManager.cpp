@@ -842,7 +842,7 @@ void WindowManager::Unmanage(WindowID id)
     bool wasFocused = window->Focused();
     int workspace = window->Workspace();
 
-    if (window->IsTiled())
+    if (window->OccupiesTreeSlot())
         m_workspaces.Get(workspace).Tree().Remove(window);
 
     m_scratchpad.Forget(id);
@@ -1053,9 +1053,12 @@ void WindowManager::MoveFocusedToWorkspace(int id)
         return;
 
     int oldWorkspaceId = window->Workspace();
-    bool wasTiled = window->IsTiled();
 
-    if (wasTiled)
+    bool wasTiled = window->IsTiled();
+    bool wasFullscreenTile =
+        window->IsFullscreen() && window->PreviousState() == WindowState::Tiled;
+
+    if (wasTiled || wasFullscreenTile)
         m_workspaces.Get(oldWorkspaceId).Tree().Remove(window);
 
     window->SetWorkspace(id);
@@ -1083,6 +1086,33 @@ void WindowManager::MoveFocusedToWorkspace(int id)
             "configured minimum size - moved window " +
             std::to_string(static_cast<unsigned long>(window->Id())) +
             " there floating instead.");
+    }
+    else if (wasFullscreenTile)
+    {
+        // A window mid-fullscreen (Telegram's media viewer, a video
+        // player, ...) should stay fullscreen right through a move to
+        // another workspace, exactly as if it had just stayed put -
+        // nothing above touched State() for this branch. All that's
+        // still needed is a freshly reserved tiled slot on the *new*
+        // workspace for it to restore into whenever it eventually
+        // un-fullscreens, the same one TryTile() would hand a window
+        // that opened there directly (see OccupiesTreeSlot()'s
+        // comment for why this can't just reuse the old workspace's
+        // now-removed leaf).
+        if (TryTile(window, id))
+        {
+            // TryTile() always sets Tiled - it's still genuinely
+            // fullscreen right now, so put that straight back.
+            window->SetState(WindowState::Fullscreen);
+        }
+        else
+        {
+            // No room even for a restore slot on the target workspace -
+            // the graceful fallback is exactly what un-fullscreening
+            // onto an already-full workspace does elsewhere: land
+            // floating instead, whenever it does eventually un-fullscreen.
+            window->SetPreviousState(WindowState::Floating);
+        }
     }
 
     window->IgnoreNextUnmap();
@@ -1169,7 +1199,7 @@ void WindowManager::ToggleScratchpadForFocused()
         if (!window || window->IsScratchpad())
             return;
 
-        if (window->IsTiled())
+        if (window->OccupiesTreeSlot())
             m_workspaces.Get(window->Workspace()).Tree().Remove(window);
 
         window->SetPreviousState(window->State());

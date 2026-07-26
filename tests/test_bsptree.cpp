@@ -215,6 +215,85 @@ int main()
     tree.Remove(A);
     Check(tree.Empty(), "tree is empty after removing every window");
 
+    std::printf(
+        "\n-- OccupiesTreeSlot (regression: a tiled window that went "
+        "fullscreen must still free its slot when it closes) --\n");
+
+    // Reproduces the exact bug report: two ordinary tiled windows
+    // (Discord, Telegram) plus a third (Telegram's Media Viewer) that
+    // gets tiled too, then asks for real EWMH fullscreen (which -
+    // correctly - leaves it in the tree so un-fullscreening can
+    // restore it to the same slot) and is then closed *while still
+    // fullscreen*, without ever un-fullscreening first.
+    ManagedWindow* discord = makeWindow(10);
+    ManagedWindow* telegram = makeWindow(11);
+    ManagedWindow* mediaViewer = makeWindow(12);
+
+    BSPTree wsTree;
+    wsTree.Insert(discord);
+    wsTree.Focus(discord);
+    wsTree.Insert(telegram);
+    wsTree.Focus(telegram);
+    wsTree.Insert(mediaViewer); // lands near Telegram, the focused window
+    wsTree.Focus(mediaViewer);
+
+    discord->SetState(WindowState::Tiled);
+    telegram->SetState(WindowState::Tiled);
+    mediaViewer->SetState(WindowState::Tiled);
+
+    layout.Apply(wsTree.Root(), area, params);
+    Check(wsTree.Count() == 3, "3 leaves once the Media Viewer tiles alongside Discord/Telegram");
+
+    // The Media Viewer asks for real fullscreen - Manage()/
+    // HandleClientMessage() record this exactly as WindowState::Tiled
+    // (PreviousState) -> WindowState::Fullscreen (State), and
+    // deliberately do NOT touch the tree.
+    mediaViewer->SetPreviousState(mediaViewer->State());
+    mediaViewer->SetState(WindowState::Fullscreen);
+
+    Check(!mediaViewer->IsTiled(), "Media Viewer's current State() is Fullscreen, not Tiled");
+    Check(mediaViewer->OccupiesTreeSlot(),
+          "...but it still logically occupies a tree slot (PreviousState() == Tiled)");
+    Check(wsTree.Count() == 3, "tree still has 3 leaves while it's fullscreen (by design, for restoring later)");
+
+    // It closes right here, still fullscreen - this is exactly what
+    // WindowManager::Unmanage() does now:
+    if (mediaViewer->OccupiesTreeSlot())
+        wsTree.Remove(mediaViewer);
+
+    Check(wsTree.Count() == 2,
+          "FIXED: closing it while fullscreen still frees its slot (the bug: "
+          "checking IsTiled() instead of OccupiesTreeSlot() left this at 3 forever)");
+
+    Rect discordBefore = discord->Geometry();
+    Rect telegramBefore = telegram->Geometry();
+
+    layout.Apply(wsTree.Root(), area, params);
+
+    Check(discord->Geometry().width  != discordBefore.width ||
+          telegram->Geometry().width != telegramBefore.width ||
+          discord->Geometry().height  != discordBefore.height ||
+          telegram->Geometry().height != telegramBefore.height,
+          "Discord and/or Telegram actually grow into the freed space on relayout "
+          "(this is the \"black empty area\"/\"stuck at its old size\" symptom - "
+          "with the bug, these rects would be unchanged since the tree still "
+          "thought there were 3 windows sharing the screen)");
+
+    // No dead space left at all: the two survivors' tiles should
+    // account for the *entire* tiling area between them (minus gaps),
+    // not just "some" of it.
+    long long survivorsArea =
+        static_cast<long long>(discord->Geometry().width)  * discord->Geometry().height +
+        static_cast<long long>(telegram->Geometry().width) * telegram->Geometry().height;
+    long long totalArea = static_cast<long long>(area.width) * area.height;
+
+    // Allow for the gaps/border insets LayoutEngine subtracts - this
+    // just needs to be "the overwhelming majority of the screen", not
+    // pixel-exact, to rule out a leftover reserved-but-unfilled slot.
+    Check(survivorsArea > (totalArea * 9) / 10,
+          "no large reserved-but-empty area is left over - the two survivors "
+          "between them account for essentially the whole screen");
+
     std::printf("\nALL %d CHECKS PASSED.\n", g_pass);
     return 0;
 }
