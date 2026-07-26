@@ -108,6 +108,30 @@ Display* XConnection::GetDisplay() const
     return m_root;
 }
 
+Point XConnection::QueryPointer() const
+{
+    ::Window root = None;
+    ::Window child = None;
+    int rootX = 0;
+    int rootY = 0;
+    int winX = 0;
+    int winY = 0;
+    unsigned int mask = 0;
+
+    // Failure here (the pointer isn't on this screen at all) is
+    // vanishingly unlikely in a single-screen X11 session, and just
+    // leaves the result at the origin - callers already treat "no
+    // monitor claims this point" as a safe no-op (see
+    // WindowManager::UpdateFocusedMonitorFromPointer()).
+    XQueryPointer(
+        m_display, m_root,
+        &root, &child,
+        &rootX, &rootY, &winX, &winY,
+        &mask);
+
+    return Point{rootX, rootY};
+}
+
 int XConnection::Screen() const
 {
     return m_screen;

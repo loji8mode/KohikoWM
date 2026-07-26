@@ -3,6 +3,6 @@
 namespace Kohiko
 {
 
-inline constexpr const char* VERSION = "0.14.0";
+inline constexpr const char* VERSION = "0.14.1";
 
 }

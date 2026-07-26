@@ -35,6 +35,17 @@ public:
 
     ::Window Root() const;
 
+    // The pointer's current position in absolute (root) coordinates -
+    // a plain XQueryPointer() wrapper. Exists for the handful of
+    // moments nothing has generated a MotionNotify/EnterNotify to
+    // report the pointer's location: right after startup, and right
+    // after a monitor topology change, both of which can otherwise
+    // leave a monitor the pointer is already sitting still over (nothing
+    // there yet to move across or enter) not actually recognized as
+    // focused - see WindowManager::HandleMonitorTopologyChanged() and
+    // WindowManager::Initialize().
+    Point QueryPointer() const;
+
     int Screen() const;
 
     // The actual display string this connection resolved to (e.g.

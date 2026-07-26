@@ -133,6 +133,20 @@ void WindowManager::Initialize()
 
     RefreshMonitorWorkAreas();
     Arrange();
+
+    // Nothing has generated a MotionNotify/EnterNotify yet at this
+    // point, so m_monitors.Focused() is still whatever Detect() fell
+    // back to (Primary()) - which is wrong whenever the pointer
+    // already happens to be sitting over a *different* monitor when
+    // Kohiko starts. An empty monitor especially has nothing on it to
+    // move over or enter, so without this, that monitor would stay
+    // "unfocused" - unable to receive a keybind-launched window, etc,
+    // even though it's exactly where the pointer already is - until
+    // the pointer physically moves. Querying it directly here instead
+    // of waiting for an event fixes that for the actual, common case
+    // of "start Kohiko while the pointer is already on a monitor
+    // that's still empty."
+    UpdateFocusedMonitorFromPointer(m_connection.QueryPointer());
 }
 
 void WindowManager::Shutdown()
@@ -2924,6 +2938,15 @@ void WindowManager::HandleMonitorTopologyChanged()
     RefreshMonitorWorkAreas();
     RelocateOrphanedFloatingWindows();
     Arrange();
+
+    // Same reasoning as the call at the end of Initialize(): a monitor
+    // that just appeared (or one whose geometry just moved) generates
+    // no MotionNotify/EnterNotify of its own, so if the pointer already
+    // happens to be sitting over it - plugging in a second monitor to
+    // the side the pointer was already resting near is the common
+    // case - it needs to be checked directly rather than waiting for
+    // the pointer to move before it's recognized as focused.
+    UpdateFocusedMonitorFromPointer(m_connection.QueryPointer());
 }
 
 void WindowManager::RebuildBars()

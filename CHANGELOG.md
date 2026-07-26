@@ -1,14 +1,15 @@
 # Changelog
 
-## Version 0.14.0
+## Version 0.14.1
 
-Release date: 2026-07-20
+Release date: 2026-07-21
 
 ### Added
-- `workspace<N>=` repeatable config directive (N from 1 to `workspace.count`): launches programs at startup exactly like `auto_start_programs=`, but pins each one to workspace N once its window actually appears, rather than wherever happened to be focused when Kohiko started.
-- `Process::IsDescendantOf()`: walks `/proc/<pid>/stat` parent-pid links to determine whether a window's `_NET_WM_PID` descends from a process Kohiko spawned, since the immediate child of `Process::Spawn()` (a `/bin/sh -c` process) is often an ancestor of, rather than identical to, the eventual application's own pid (more so for programs with their own launcher script, such as Steam).
-- `WindowManager::ResolveWorkspaceAutostart()`: matches a newly-managed window's pid against pending `workspace<N>=` launches, within a 60-second eligibility window so a long-running process opening an unrelated window later in the session is not redirected.
+- `XConnection::QueryPointer()`: a direct `XQueryPointer()` wrapper returning the pointer's current position in root coordinates.
+
+### Fixed
+- Fixed the focused monitor not being correctly detected right after startup, or right after a monitor topology change (hotplug), when the pointer was already sitting over a monitor that had nothing on it to generate a `MotionNotify`/`EnterNotify` event (most commonly, an empty monitor). Kohiko now directly queries the pointer position at the end of `Initialize()` and after handling a monitor topology change, instead of waiting for a pointer-motion event to establish which monitor is focused.
+- Restored the `auto_start_programs=` config section, which had been inadvertently dropped from `config/default.conf` when `workspace<N>=` was introduced in 0.14.0.
 
 ### Changed
-- `Process::Spawn()` now returns the spawned process's pid (`-1` on failure) instead of returning nothing.
-- A `workspace<N>=` placement takes precedence over a window's parent-attachment (from 0.10.0/0.11.0), but an explicit `windowrule=workspace:N` still wins over both.
+- Default config's example `workspace1=`/`workspace2=`/`workspace3=` lines are now commented out (they had been left active/uncommented in 0.14.0's default config).
