@@ -16,19 +16,30 @@ class ManagedWindow;
 
 // The interesting logic the spec calls out for this file: tracks a
 // Super+drag from press through motion to release and turns it into
-// either a pick-up-and-drop swap (LMB) or a live ratio resize (RMB).
+// either a pick-up-and-drop swap (LMB on a tiled window), a live
+// follow-the-cursor move (LMB on a floating window - see
+// WindowManager::BeginFloatingDrag()), or a live ratio resize (RMB).
 //
-//   LMB: press -> hit-test a leaf -> WindowManager detaches it and
-//        follows the cursor with it on every motion event (nothing
-//        else moves) -> release -> WindowManager hit-tests the drop
-//        point and either swaps the two windows or snaps back, both
-//        cases animated into place
+//   LMB on a tiled window:    press -> hit-test a leaf -> WindowManager
+//        detaches it and follows the cursor with it on every motion
+//        event (nothing else moves) -> release -> WindowManager
+//        hit-tests the drop point and either swaps the two windows or
+//        snaps back, both cases animated into place
+//   LMB on a floating window: press -> hit-test the topmost floating
+//        window under the cursor -> WindowManager moves it with the
+//        cursor 1:1 on every motion event, re-homing it onto whichever
+//        monitor it's currently over as it crosses (see
+//        WindowManager::UpdateFloatingDrag()) -> release -> it stays
+//        exactly there, clamped to its final monitor
 //   RMB: press -> hit-test a leaf -> cursor moves -> feed the pixel
 //        delta straight into Resize() every motion event -> repeat
 //
-// No floating-window move/resize-by-drag here on purpose - the spec
-// is explicit that this is Hyprland-style BSP dragging, not the
-// classic i3 floating-window drag.
+// Also the entry point for ambient pointer tracking: every
+// MotionNotify that arrives while no drag is active (root has
+// PointerMotionMask selected all the time - see XConnection::
+// BecomeWindowManager()) is forwarded to WindowManager::
+// HandlePointerMotion() instead, purely so "focused monitor" can
+// follow the cursor across bare desktop between monitors.
 class MouseManager
 {
 public:
@@ -68,6 +79,7 @@ private:
     {
         Idle,
         Swap,
+        Move,
         Resize
     };
 

@@ -64,7 +64,18 @@ bool XConnection::BecomeWindowManager()
         StructureNotifyMask |
         PropertyChangeMask |
         EnterWindowMask |
-        LeaveWindowMask
+        LeaveWindowMask |
+        // Multi-monitor: lets WindowManager track the pointer's
+        // current monitor even while it's gliding over bare desktop
+        // between two monitors (a single root window spans every
+        // monitor - RandR outputs are regions within it, not separate
+        // X11 windows - so EnterNotify/LeaveNotify alone can never see
+        // that particular crossing; see WindowManager::
+        // HandlePointerMotion()). Harmless to select unconditionally:
+        // MouseManager only acts on these events when no Super+drag is
+        // in progress, and EventLoop already compresses a burst of
+        // MotionNotify for the same window down to the latest one.
+        PointerMotionMask
     );
 
     XSync(m_display, False);

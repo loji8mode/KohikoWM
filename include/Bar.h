@@ -5,6 +5,7 @@
 
 #include <X11/Xlib.h>
 
+#include <chrono>
 #include <string>
 
 namespace Kohiko
@@ -50,6 +51,19 @@ public:
 
     void SetTitle(
         const std::string& title
+    );
+
+    // Replaces the title area with `text` for `durationMs` (default a
+    // few seconds), then reverts to showing the real title again on
+    // its own - Redraw() checks the expiry itself, so nothing needs to
+    // explicitly clear it. Used for things the user needs to notice
+    // right now but that aren't worth a persistent indicator (a
+    // rejected workspace-switch request - see WindowManager::
+    // SwitchWorkspaceOnMonitor()). Calling this again before the
+    // previous one expired just replaces it/resets the timer.
+    void ShowNotification(
+        const std::string& text,
+        int durationMs = 2500
     );
 
     void SetScratchpadActive(
@@ -108,6 +122,12 @@ private:
     std::string m_title;
     bool m_scratchpadActive = false;
     bool m_notepadActive = false;
+
+    // See ShowNotification() - empty/default-constructed time_point
+    // when there's nothing to show; Redraw() clears m_notificationText
+    // itself the first time it notices `now >= m_notificationExpiry`.
+    std::string m_notificationText;
+    std::chrono::steady_clock::time_point m_notificationExpiry;
 
     SystemTray* m_tray = nullptr;
 

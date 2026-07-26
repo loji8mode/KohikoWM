@@ -62,9 +62,25 @@ void MouseManager::HandlePress(
 
     if (Matches(m_swapBinding, event.state, event.button))
     {
-        m_dragWindow = m_windowManager.WindowAt(point);
         m_lastX = event.x_root;
         m_lastY = event.y_root;
+
+        // A floating window sits visually on top of whatever tile
+        // happens to be underneath it - check for one first so
+        // grabbing it picks *it* up (to move it) rather than the tile
+        // beneath (to swap it), which is all WindowAt()'s tree hit-test
+        // alone would ever find.
+        ManagedWindow* floating = m_windowManager.FloatingWindowAt(point);
+
+        if (floating)
+        {
+            m_dragWindow = floating;
+            m_mode = DragMode::Move;
+            m_windowManager.BeginFloatingDrag(m_dragWindow, point);
+            return;
+        }
+
+        m_dragWindow = m_windowManager.WindowAt(point);
 
         if (!m_dragWindow)
             return; // nothing under the cursor to pick up
@@ -93,7 +109,16 @@ void MouseManager::HandleMotion(
     const XMotionEvent& event)
 {
     if (m_mode == DragMode::Idle || !m_dragWindow)
+    {
+        // No Super+drag in progress - this is ambient tracking (root
+        // has PointerMotionMask selected all the time now, see
+        // XConnection::BecomeWindowManager()), purely so the focused
+        // monitor can follow the cursor across bare desktop. Never
+        // touches m_lastX/Y (those belong to an active drag's own
+        // delta tracking) or falls through to the drag logic below.
+        m_windowManager.HandlePointerMotion(event);
         return;
+    }
 
     Point point{event.x_root, event.y_root};
 
@@ -104,6 +129,10 @@ void MouseManager::HandleMotion(
         // is released. "Where it lands" is decided once, at drop
         // time, in WindowManager::EndSwapDrag().
         m_windowManager.UpdateSwapDrag(m_dragWindow, point);
+    }
+    else if (m_mode == DragMode::Move)
+    {
+        m_windowManager.UpdateFloatingDrag(m_dragWindow, point);
     }
     else if (m_mode == DragMode::Resize)
     {
@@ -124,6 +153,11 @@ void MouseManager::HandleRelease(
     {
         Point point{event.x_root, event.y_root};
         m_windowManager.EndSwapDrag(m_dragWindow, point);
+    }
+    else if (m_mode == DragMode::Move && m_dragWindow)
+    {
+        Point point{event.x_root, event.y_root};
+        m_windowManager.EndFloatingDrag(m_dragWindow, point);
     }
     else if (m_mode == DragMode::Resize)
     {

@@ -146,6 +146,14 @@ void Bar::SetTitle(
     m_title = title;
 }
 
+void Bar::ShowNotification(
+    const std::string& text,
+    int durationMs)
+{
+    m_notificationText = text;
+    m_notificationExpiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(durationMs);
+}
+
 void Bar::SetScratchpadActive(
     bool active)
 {
@@ -202,7 +210,12 @@ void Bar::Redraw()
         x += 34;
     }
 
-    if (!m_title.empty())
+    if (!m_notificationText.empty() && std::chrono::steady_clock::now() >= m_notificationExpiry)
+        m_notificationText.clear();
+
+    if (!m_notificationText.empty())
+        DrawText(x + 16, baseline, m_notificationText, m_activePixel);
+    else if (!m_title.empty())
         DrawText(x + 16, baseline, m_title, m_foregroundPixel);
 
     int trayWidth = 0;

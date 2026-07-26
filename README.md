@@ -33,7 +33,7 @@ a full compositor.
 - [Keyboard layouts / languages](#keyboard-layouts--languages)
 - [Default keybindings](#default-keybindings)
 - [EWMH support](#ewmh-support)
-- [The mouse: swap and resize](#the-mouse-swap-and-resize)
+- [The mouse: swap, move, and resize](#the-mouse-swap-move-and-resize)
 - [The launcher (Super+D)](#the-launcher-superd)
 - [The notepad (Super+N)](#the-notepad-supern)
 - [Fonts and languages](#fonts-and-languages)
@@ -250,56 +250,74 @@ treating the whole X display as one monitor if XRandr isn't available)
 and gives each one its own independent workspace, exactly like
 i3/bspwm/Hyprland: switching workspace on one monitor never touches
 what any other monitor is showing, each has its own completely
-separate `BSPTree`, and fullscreen only ever covers the monitor it was
-toggled on.
+separate `BSPTree`, its own bar, and fullscreen only ever covers the
+monitor it was toggled on.
 
 ```
 Monitor 1 (HDMI-1) -> Workspace 1        Monitor 1: Workspace 1 -> Workspace 2
 Monitor 2 (DP-1)   -> Workspace 5   ->   Monitor 2: Workspace 5 (unchanged)
 ```
 
-If you ask for a workspace that's already showing on a *different*
-monitor, the two monitors swap what they're showing rather than ever
-displaying the same workspace twice or silently refusing - no
-workspace ever disappears just because you switched to it somewhere
-else.
+**Focus follows the mouse, monitor for monitor** - whichever monitor
+the cursor is currently over is "the focused one": where a new window
+opens, which one `workspace <N>`/`movetoworkspace <N>` operate on, and
+so on. Just move the pointer there - onto a window, or onto bare
+desktop - there's no keybind for it and nothing to press first. (This
+is a separate, always-on mechanism from `general.focus_follows_mouse`,
+which only controls whether hovering a *specific window* steals its
+focus within a monitor; which monitor is focused follows the cursor
+either way.) `focusmonitor`/`movetomonitor <left|right|up|down|N>`
+still exist as plain commands if you'd rather bind explicit keyboard
+control yourself (`kohikoctl dispatch focusmonitor right`, or a `bind=`
+line) - nothing is bound to them by default anymore.
 
-**Keybindings** (see `config/default.conf` to change them):
+**Every monitor has its own bar**, each showing that monitor's *own*
+active workspace - Monitor 1's bar highlights workspace 1 while
+Monitor 2's highlights workspace 5, independently, exactly matching
+whatever `kohikoctl monitors` reports for each. Only the currently-
+focused monitor's bar shows a window title (real X input focus is
+singular, so that's the only one with a genuine "focused window" to
+show); the clock and the scratchpad/notepad indicators appear on every
+bar. The system tray is a single X11-wide selection, so it can only
+ever dock on one bar - it stays on whichever monitor is Primary().
 
-| Bind | Action |
-|------|--------|
-| `Super+.` / `Super+,` | Focus the next monitor right / left |
-| `Super+Shift+.` / `Super+Shift+,` | Move the focused window to the next monitor right / left |
+**Dragging a floating window (Super+LMB) across a monitor boundary
+transfers it live** - grab it, drag past the edge, and it belongs to
+the new monitor's workspace immediately, still glued to the cursor;
+releasing the button just clamps its final position to whatever
+monitor it's over so it can't end up partly off-screen. (Super+LMB on
+a *tiled* window keeps doing what it always did - pick it up and drop
+it onto another tile to swap the two - dragging is only "move it
+around" for a floating one.)
 
-Both also take `up`/`down` (for a vertically-stacked layout) or a
-1-based number (`focusmonitor 2`, `movetomonitor 2` - numbered
-left-to-right/top-to-bottom, the same order `kohikoctl monitors`
-lists them in) instead of a direction, if you'd rather bind those
-directly. A moved window keeps its floating/tiled/fullscreen state -
-a tiled window lands in a real slot on the destination monitor's
-workspace (falling back to floating if that workspace's layout has no
-room, same as opening a new window would); a floating one is re-homed
-into the destination's coordinate space at the same relative
-position, not just recentered. Focus itself stays on the source
-monitor afterward, the same way i3/bspwm's "move to output" doesn't
-follow the window across - only the explicit `focusmonitor` bind (or
-clicking/mousing over a window on it, if `general.focus_follows_mouse`
-is on) changes which monitor is focused.
+**Workspace conflicts are rejected, never swapped or stolen:** asking
+a monitor to switch to a workspace that's already visible on a
+*different* monitor does nothing to either monitor except show a
+notification (right there on the requesting monitor's own bar, for a
+few seconds) explaining why:
 
-**New windows** open on whichever monitor is currently focused, except
-a transient/dialog child, which always follows its *parent's* monitor
-instead (see [Window rules](#window-rules) above) - so a launcher on
-monitor 2 always gets its own update dialog on monitor 2 too, even if
-you'd switched focus to monitor 1 in between.
+```
+Workspace 3 visible on monitor 1
+                                        Result: nothing changes -
+User asks monitor 2 to switch to it -> monitor 2's bar shows
+                                        "Workspace 3 is already
+                                         visible on monitor 1"
+```
+
+**New windows** open on whichever monitor is currently focused (i.e.
+under the cursor), except a transient/dialog child, which always
+follows its *parent's* monitor instead (see [Window rules](#window-rules)
+above) - so a launcher on monitor 2 always gets its own update dialog
+on monitor 2 too, even if the cursor is over monitor 1 at that instant.
 
 **Hotplug** is handled automatically: connecting or disconnecting a
 monitor re-detects the whole layout, gives any newly-connected output
-its own workspace (see `monitor=` below), and re-homes any floating
-window whose position no longer lands on *any* remaining monitor onto
-whichever one now shows its workspace, so nothing is ever left
-positioned in space that no longer exists. A tiled window needs no
-such fixup - its layout ratios simply apply to whatever monitor ends
-up showing that workspace next.
+its own workspace (see `monitor=` below), rebuilds each monitor's own
+bar to match, and re-homes any floating window whose position no
+longer lands on *any* remaining monitor onto whichever one now shows
+its workspace, so nothing is ever left positioned in space that no
+longer exists. A tiled window needs no such fixup - its layout ratios
+simply apply to whatever monitor ends up showing that workspace next.
 
 Pin a specific output to a specific starting workspace with
 `monitor=<name>,workspace=<N>` (run `kohikoctl monitors` to see the
@@ -319,8 +337,8 @@ syntax is intentionally the same `key,key=value,...` shape
 without a new config syntax.
 
 `kohikoctl monitors` dumps the full live state as JSON - id, XRandr
-output name, geometry, `workArea` (geometry minus whatever Kohiko's
-bar reserves), which workspace is active there, and whether it's the
+output name, geometry, `workArea` (geometry minus that monitor's own
+bar), which workspace is active there, and whether it's the
 primary/focused one:
 
 ```json
@@ -385,10 +403,14 @@ only what other programs see you type changes.
 | `Super+H/J/K/L`        | move focus left/down/up/right             |
 | `Super+1..0`           | switch to workspace 1-10                  |
 | `Super+Shift+1..0`     | send the focused window to workspace 1-10 |
-| `Super+. / Super+,`    | focus the next monitor right / left (see [Multi-monitor](#multi-monitor)) |
-| `Super+Shift+. / Super+Shift+,` | move the focused window to the next monitor right / left |
 | `Super+Shift+C`        | reload the config                         |
 | `Super+Shift+Q`        | quit Kohiko                               |
+
+Which *monitor* is focused isn't a keybind at all - it just follows
+the mouse pointer (see [Multi-monitor](#multi-monitor)); `Super+LMB`
+drag on a floating window also carries it across monitor boundaries
+live. `focusmonitor`/`movetomonitor` remain available as commands for
+anyone who wants an explicit keybind of their own.
 
 All of the above are just entries in `kohiko.conf` - remove, remap, or add
 to them freely; nothing is hardcoded.
@@ -400,7 +422,12 @@ dock an icon there (NetworkManager, Bluetooth, volume, etc.) show up at
 the right edge of the bar, just left of the clock, the same way they
 would in any other status bar. No configuration needed - Kohiko takes
 ownership of the tray selection on startup and lays out whatever docks
-itself with it, left to right, in the order it arrived.
+itself with it, left to right, in the order it arrived. On a
+multi-monitor setup (every monitor has its own bar - see
+[Multi-monitor](#multi-monitor)) the tray is a single X11-wide
+selection, so it can only ever live on one of them - it stays on
+whichever monitor is Primary(), following it if a hotplug changes
+which one that is.
 
 ## EWMH support
 
@@ -436,13 +463,13 @@ the motivating example - work correctly under Kohiko instead of falling
 back to less reliable window discovery, *and* actually receive the real
 fullscreen they ask for once they do.
 
-## The mouse: swap and resize
+## The mouse: swap, move, and resize
 
-These are the two gestures the whole layout is built around:
+These are the gestures the whole layout is built around:
 
-- **`Super` + left-click and drag** picks up whatever window is under the
-  cursor: it detaches and follows the cursor exactly, and nothing else on
-  screen moves while you're dragging - this is deliberately not a live
+- **`Super` + left-click and drag on a *tiled* window** picks it up: it
+  detaches and follows the cursor exactly, and nothing else on screen
+  moves while you're dragging - this is deliberately not a live
   swap-on-hover, so the only thing that happens *is* the thing you're
   doing. Whichever tiled window you're currently over gets a highlighted
   border as a preview of what you're about to swap with. Release over a
@@ -451,6 +478,12 @@ These are the two gestures the whole layout is built around:
   and it slides back home instead. Geometry itself never changes - only
   which window occupies which tile does - the sliding motion is just
   confirming that for you, not decoration.
+- **`Super` + left-click and drag on a *floating* window** just moves
+  it, 1:1 with the cursor, the classic i3-style floating drag - and on
+  a multi-monitor setup, dragging it across a monitor boundary
+  transfers it onto the destination monitor's workspace immediately,
+  live, mid-drag (see [Multi-monitor](#multi-monitor)); releasing the
+  button clamps it to stay fully on whichever monitor it ends up over.
 - **`Super` + right-click and drag** resizes: the window you grabbed grows
   or shrinks in whichever direction you drag it, and its neighbour shrinks
   or grows to match, exactly like dragging the divider between them -
@@ -458,11 +491,10 @@ These are the two gestures the whole layout is built around:
   under a fast/laggy pointer (Kohiko collapses a backlog of motion events
   down to the latest one rather than working through it one at a time).
 
-Both are rebindable via `mouse.swap=` / `mouse.resize=` (e.g. `SUPER+BTN2`
-for the middle button). Floating windows are intentionally not part of
-either gesture - dragging a floating window around isn't something this
-layout is trying to do (per the original design note: no floating-window
-move like i3, specifically Hyprland-style BSP dragging only).
+Both left-click gestures share one bind (`mouse.swap=`, default
+`SUPER+BTN1`) - which one happens just depends on whether the window
+under the cursor is tiled or floating. Resize is separately rebindable
+via `mouse.resize=` (e.g. `SUPER+BTN2` for the middle button).
 
 ## The launcher (Super+D)
 
@@ -583,7 +615,7 @@ Roughly the file layout the project was designed around, one responsibility each
 | `LayoutEngine`             | Walks the tree and turns ratios into pixels (gaps, borders, smart gaps/borders) |
 | `WindowManager`            | Coordinator - owns everything else, sequences the actual X11 event handling |
 | `KeyboardManager`          | Config binds -> grabbed keys -> `Command`s. No other logic. |
-| `MouseManager`             | The Super+drag state machine described above |
+| `MouseManager`             | The Super+drag state machine described above, plus routing ambient pointer motion to monitor-focus-follow when no drag is active |
 | `Animator`                 | The small rect-tween stepper behind the Swap-drop animation |
 | `Launcher`                 | The native `Super+D` input box |
 | `Notepad`                  | The native `Super+N` scratch-notes box, with disk persistence |
@@ -595,7 +627,7 @@ Roughly the file layout the project was designed around, one responsibility each
 | `Config` / `ConfigParser`  | The `key=value` file, with repeatable keys for `bind=`/`exec.*=`/`windowrule=`/`monitor=` |
 | `WindowRule`                | Parses/matches `windowrule=` lines - see [Window rules](#window-rules) |
 | `IPCServer` / `kohikoctl`  | The Unix-socket control protocol and its CLI client |
-| `Bar`                      | Workspaces, active title, scratchpad/notepad indicators, clock - plain Xlib text, no toolkit |
+| `Bar`                      | One instance per monitor - its own workspaces/active-highlight, a title (focused monitor only), scratchpad/notepad indicators, clock, transient notifications - plain Xlib text, no toolkit |
 | `MonitorManager` / `Monitor` / `MonitorRule` | XRandr detection and hotplug, one monitor's geometry/`WorkArea()`/active workspace, `monitor=` rule parsing - see [Multi-monitor](#multi-monitor) |
 
 A `BSPNode`'s `Geometry()` is its raw tree-partition rect (no gaps - used
@@ -627,18 +659,12 @@ into a tile it's already shown it won't render into correctly.
 
 ## Known limitations
 
-- **The bar, launcher, and notepad are single, global panels, always on
-  the primary monitor** - not one per output. Every workspace/window
-  still tiles and floats correctly on whichever monitor it's actually
-  on; it's specifically these three panels that don't (yet) follow you
-  across monitors the way i3bar-per-output setups do.
-- **Focus doesn't follow the mouse onto empty space on another
-  monitor** - moving the pointer onto a *window* on another monitor
-  focuses it as normal (if `general.focus_follows_mouse` is on); moving
-  it onto bare desktop background on another monitor doesn't, since
-  Kohiko doesn't currently track root-window pointer motion. `focusmonitor
-  left/right/up/down` (see [Multi-monitor](#multi-monitor)) always works
-  regardless.
+- **The launcher and notepad are single, global panels, always on the
+  primary monitor** - not one per output, unlike the bar (see
+  [Multi-monitor](#multi-monitor)). Every workspace/window still tiles
+  and floats correctly on whichever monitor it's actually on; it's
+  specifically these two modal overlays that don't (yet) follow you
+  across monitors.
 - **The scratchpad holds one window at a time** - assign a new one only
   after closing (or `Super+Space`-releasing) the current occupant.
 - Moving a **floating** window around isn't bound to anything by design

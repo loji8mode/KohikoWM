@@ -39,7 +39,6 @@ WindowManager::WindowManager(
     m_mouse(connection, *this),
     m_dispatcher(*this, m_keyboard, m_mouse),
     m_ipc(),
-    m_bar(connection),
     m_launcher(connection),
     m_notepad(connection),
     m_animator()
@@ -80,6 +79,13 @@ void WindowManager::Initialize()
             // see HandleMonitorEvent()) rather than per-monitor here.
         });
 
+    // Creates one Bar per connected monitor and shows them; the system
+    // tray pointer gets attached to whichever one is Primary()'s right
+    // away too (safe even before m_tray.Initialize() below actually
+    // creates its window - AttachSystemTray() just stores the pointer,
+    // nothing dereferences it until the first real Redraw()).
+    RebuildBars();
+
     // Advertise EWMH support - _NET_SUPPORTED/_NET_SUPPORTING_WM_CHECK
     // let tools that check for a compliant window manager (flameshot's
     // screenshot overlay among them) trust _NET_CLIENT_LIST and
@@ -87,15 +93,11 @@ void WindowManager::Initialize()
     // current from here on.
     m_ewmhCheckWindow = m_connection.InitializeEwmhSupport(m_atoms, "kohiko");
 
-    m_bar.Configure(m_config, m_monitors.Primary().Geometry());
-    m_bar.Show();
-
-    m_tray.Initialize(m_connection, m_bar.WindowId());
-    m_bar.AttachSystemTray(&m_tray);
+    if (Bar* primaryBar = BarFor(m_monitors.Primary()))
+        m_tray.Initialize(m_connection, primaryBar->WindowId());
 
     m_launcher.Configure(m_config, m_monitors.Primary().Geometry());
     m_notepad.Configure(m_config, m_monitors.Primary().Geometry());
-    m_bar.SetNotepadActive(m_notepad.HasContent());
 
     m_windowRules = LoadWindowRules(m_config);
 
@@ -137,7 +139,9 @@ void WindowManager::Shutdown()
 {
     m_ipc.Stop();
     m_tray.Shutdown();
-    m_bar.Hide();
+
+    for (auto& [monitor, bar] : m_bars)
+        bar->Hide();
 }
 
 bool WindowManager::IsRunning() const
@@ -166,7 +170,10 @@ void WindowManager::Tick()
     if (m_notepad.IsOpen())
         m_notepad.Blink();
 
-    m_bar.Redraw();
+    // Also what clears a Bar::ShowNotification() once it expires - see
+    // Bar::Redraw()'s own expiry check.
+    for (auto& [monitor, bar] : m_bars)
+        bar->Redraw();
 }
 
 bool WindowManager::HasActiveAnimation() const
@@ -329,6 +336,14 @@ void WindowManager::HandleEnterNotify(const XCrossingEvent& event)
     if (event.mode != NotifyNormal || !pointerActuallyMoved)
         return;
 
+    // Multi-monitor: the pointer crossing into *any* window (even one
+    // on the same monitor) is as good a signal as the ambient
+    // MotionNotify tracking in HandlePointerMotion() is for bare
+    // desktop - update here too so a crossing between two monitors is
+    // noticed the instant it happens, not on the next bit of ambient
+    // motion over background.
+    UpdateFocusedMonitorFromPointer(Point(event.x_root, event.y_root));
+
     // The Launcher/Notepad hold input focus for typing - a background
     // window happening to be under the pointer must not steal it back
     // (that's the exact "hotkeys/typing quietly stop working" failure
@@ -343,6 +358,39 @@ void WindowManager::HandleEnterNotify(const XCrossingEvent& event)
 
     if (window && !window->Focused())
         Focus(event.window);
+}
+
+void WindowManager::HandlePointerMotion(const XMotionEvent& event)
+{
+    // Purely the "gliding over bare desktop between two monitors"
+    // case - see the class comment and XConnection::
+    // BecomeWindowManager(). Crossing into an actual window is already
+    // covered by HandleEnterNotify() above; this just fills the one
+    // gap that leaves (a single root window spans every monitor, so
+    // there's no window-boundary crossing to catch mid-glide).
+    UpdateFocusedMonitorFromPointer(Point(event.x_root, event.y_root));
+}
+
+void WindowManager::UpdateFocusedMonitorFromPointer(const Point& pointer)
+{
+    // Same reasoning as HandleEnterNotify()'s own guard: the Launcher/
+    // Notepad hold real X input focus for typing, and FocusMonitor()
+    // below would otherwise yank it away the moment the pointer merely
+    // drifted over another monitor - freezing which monitor is
+    // "focused" while either is open (it picks back up again the
+    // instant it closes) is what keeps that from happening.
+    if (m_launcher.IsOpen() || m_notepad.IsOpen())
+        return;
+
+    Monitor* under = m_monitors.Containing(pointer);
+
+    // No monitor claims this exact point (can happen transiently
+    // mid-hotplug, or right at a pixel just past every monitor's
+    // edge) - nothing sane to do, leave focus exactly where it was.
+    if (!under || under == m_monitors.Focused())
+        return;
+
+    FocusMonitor(*under);
 }
 
 void WindowManager::HandleFocusIn(const XFocusChangeEvent& event)
@@ -381,10 +429,7 @@ void WindowManager::HandlePropertyNotify(const XPropertyEvent& event)
     window->SetTitle(m_connection.GetWindowTitle(event.window, m_atoms));
 
     if (window->Focused())
-    {
-        m_bar.SetTitle(window->Title());
-        m_bar.Redraw();
-    }
+        UpdateAllBars();
 }
 
 void WindowManager::HandleButtonPressOnClient(const XButtonEvent& event)
@@ -410,8 +455,8 @@ void WindowManager::HandleExpose(const XExposeEvent& event)
     if (event.count != 0)
         return;
 
-    if (event.window == m_bar.WindowId())
-        m_bar.Redraw();
+    if (Bar* bar = BarWindowMatching(event.window))
+        bar->Redraw();
     else if (event.window == m_launcher.WindowId())
         m_launcher.HandleExpose();
     else if (event.window == m_notepad.WindowId())
@@ -597,6 +642,43 @@ ManagedWindow* WindowManager::WindowAt(const Point& point)
     return workspace->Tree().HitTest(point);
 }
 
+ManagedWindow* WindowManager::FloatingWindowAt(const Point& point) const
+{
+    ManagedWindow* focusedMatch = nullptr;
+    ManagedWindow* lastMatch = nullptr;
+
+    // Scans every monitor, not just the focused one - the point being
+    // dragged from could be over any of them, and there's no reason to
+    // assume it's the focused monitor specifically (the mouse just put
+    // the cursor there; UpdateFocusedMonitorFromPointer() will have
+    // already made that monitor the focused one anyway by the time a
+    // press event follows the crossing, but there's no need to depend
+    // on that ordering here).
+    for (const auto& monitor : m_monitors.All())
+    {
+        Workspace* workspace = monitor->ActiveWorkspace();
+
+        if (!workspace)
+            continue;
+
+        for (ManagedWindow* window : m_repository.Visible(workspace->Id()))
+        {
+            if (!window->IsFloating())
+                continue;
+
+            if (!window->Geometry().Contains(point))
+                continue;
+
+            lastMatch = window;
+
+            if (window->Focused())
+                focusedMatch = window;
+        }
+    }
+
+    return focusedMatch ? focusedMatch : lastMatch;
+}
+
 void WindowManager::SwapWindows(ManagedWindow* first, ManagedWindow* second)
 {
     if (!first || !second)
@@ -722,6 +804,100 @@ void WindowManager::EndSwapDrag(ManagedWindow* window, const Point& cursor)
     }
 }
 
+void WindowManager::BeginFloatingDrag(ManagedWindow* window, const Point& cursor)
+{
+    if (!window || !window->IsFloating())
+        return;
+
+    m_activeDragWindow = window;
+
+    const Rect& geometry = window->Geometry();
+    m_dragOffsetX = cursor.x - geometry.x;
+    m_dragOffsetY = cursor.y - geometry.y;
+    m_dragCurrentRect = geometry;
+
+    m_connection.Raise(window->Id());
+    RaiseModalWindows();
+    m_cursor.SetDragging(true);
+}
+
+void WindowManager::UpdateFloatingDrag(ManagedWindow* window, const Point& cursor)
+{
+    if (!window || window != m_activeDragWindow)
+        return;
+
+    // Follows the cursor 1:1, same as a Swap drag - just never swaps
+    // anything, since there's no tile to trade places with.
+    m_dragCurrentRect.x = cursor.x - m_dragOffsetX;
+    m_dragCurrentRect.y = cursor.y - m_dragOffsetY;
+
+    m_connection.MoveWindowTo(window->Id(), m_dragCurrentRect.x, m_dragCurrentRect.y);
+    window->SetGeometry(m_dragCurrentRect);
+
+    // Requirement 3: live monitor crossing. Whichever monitor the
+    // window's center currently sits over becomes its home immediately,
+    // not just once the drag ends - "drag across the boundary, it
+    // belongs to the new monitor" - purely bookkeeping (workspace
+    // membership) here, deliberately leaving its on-screen position
+    // exactly where the cursor put it; EndFloatingDrag() is what
+    // finally clamps/re-homes the geometry itself once the button is
+    // released.
+    Point center(m_dragCurrentRect.CenterX(), m_dragCurrentRect.CenterY());
+    Monitor* under = m_monitors.Containing(center);
+
+    if (!under || !under->ActiveWorkspace() || under->Id() == window->Monitor())
+        return;
+
+    int newWorkspaceId = under->ActiveWorkspace()->Id();
+
+    if (window->Workspace() != newWorkspaceId)
+        window->SetWorkspace(newWorkspaceId);
+
+    window->SetMonitor(under->Id());
+
+    // Keeps everything else consistent (bar workspace indicators,
+    // `kohikoctl clients`/`monitors`, any tiled windows on the
+    // source/destination workspaces reflowing to account for one
+    // gaining/losing a floating window - which doesn't actually change
+    // their layout, since floating windows never participate in the
+    // BSP tree, but keeps Visible()'s bookkeeping honest either way)
+    // without moving this window's own geometry - it's exempted from
+    // ArrangeMonitor()'s positioning while m_activeDragWindow, same as
+    // during a Swap drag.
+    Arrange();
+}
+
+void WindowManager::EndFloatingDrag(ManagedWindow* window, const Point& cursor)
+{
+    if (!window || window != m_activeDragWindow)
+        return;
+
+    m_cursor.SetDragging(false);
+
+    m_dragCurrentRect.x = cursor.x - m_dragOffsetX;
+    m_dragCurrentRect.y = cursor.y - m_dragOffsetY;
+
+    Point center(m_dragCurrentRect.CenterX(), m_dragCurrentRect.CenterY());
+    Monitor* landedOn = m_monitors.Containing(center);
+    Monitor& finalMonitor = landedOn ? *landedOn : FocusedMonitor();
+
+    // Final clamp against whichever monitor it's actually landing on -
+    // releasing right at (or past) an edge can't leave it partially or
+    // fully off every monitor.
+    Rect finalRect = m_dragCurrentRect.ClampedTo(finalMonitor.WorkArea(), window->BorderWidth());
+
+    window->SetGeometry(finalRect);
+    window->SetFloatingGeometry(finalRect);
+    window->SetMonitor(finalMonitor.Id());
+
+    if (finalMonitor.ActiveWorkspace())
+        window->SetWorkspace(finalMonitor.ActiveWorkspace()->Id());
+
+    m_activeDragWindow = nullptr;
+
+    Arrange();
+}
+
 // --- IPCServer-facing API ---------------------------------------------------
 
 std::string WindowManager::HandleIpcCommand(const std::string& request)
@@ -799,7 +975,7 @@ void WindowManager::Manage(WindowID id)
     // combination" means in practice: CloseFocused() only ever acts on
     // m_repository.Focused(), and this is what keeps that set free of
     // Kohiko's own popups by construction, not by convention.
-    if (id == m_bar.WindowId() || id == m_launcher.WindowId() || id == m_notepad.WindowId())
+    if (BarWindowMatching(id) || id == m_launcher.WindowId() || id == m_notepad.WindowId())
         return;
 
     XWindowAttributes attrs{};
@@ -1196,8 +1372,7 @@ void WindowManager::Focus(WindowID id)
             RefreshBorderColor(other);
     }
 
-    m_bar.SetTitle(window->Title());
-    m_bar.Redraw();
+    UpdateAllBars();
 }
 
 void WindowManager::FocusNextAvailable()
@@ -1227,8 +1402,7 @@ void WindowManager::FocusNextAvailableOn(Monitor& monitor)
     m_repository.ClearFocus();
     m_connection.SetInputFocus(m_connection.Root());
     m_connection.SetActiveWindow(m_atoms, None);
-    m_bar.SetTitle("");
-    m_bar.Redraw();
+    UpdateAllBars();
 }
 
 void WindowManager::Arrange()
@@ -1290,12 +1464,7 @@ void WindowManager::Arrange()
     for (const auto& monitor : m_monitors.All())
         ArrangeMonitor(*monitor);
 
-    Workspace* focusedWorkspace = FocusedMonitor().ActiveWorkspace();
-
-    m_bar.SetWorkspaces(m_workspaces.Count(), focusedWorkspace ? focusedWorkspace->Id() : 0);
-    m_bar.SetScratchpadActive(m_scratchpad.HasWindow() && m_scratchpad.IsVisible());
-    m_bar.SetNotepadActive(m_notepad.HasContent());
-    m_bar.Redraw();
+    UpdateAllBars();
 
     // Every Raise() above (a newly-mapped window, a floating window,
     // a fullscreen window) happened *after* the Launcher/Notepad were
@@ -1379,27 +1548,21 @@ void WindowManager::ArrangeMonitor(Monitor& monitor)
 
 void WindowManager::RefreshMonitorWorkAreas()
 {
-    // The bar is a single, global panel today (see Bar.h) - always
-    // hosted on Primary(), regardless of which monitor is focused.
-    // Every other monitor's work area is simply its full geometry.
+    // Every monitor hosts its own bar now (see RebuildBars()), so every
+    // one reserves space for it - unlike the single-global-bar days,
+    // there's no "only Primary() loses space to it" special case left.
     // Kept as its own pass (rather than folded into ArrangeMonitor())
     // so TryTile()/CenteredFloatingRect()/FindWorkspaceWithRoom() can
     // all read a monitor's WorkArea() directly without needing to
     // know the bar even exists.
+    int barHeight = m_config.GetInt("general.bar_height", 26);
+
     for (const auto& monitor : m_monitors.All())
     {
         Rect area = monitor->Geometry();
 
-        // monitor->IsPrimary() alone isn't quite enough: XRandR is
-        // never required to actually mark anything primary, and when
-        // nothing does, Primary() itself falls back to the leftmost
-        // connected monitor - comparing identity against Primary()'s
-        // actual return value is what stays correct in that case too.
-        if (monitor.get() == &m_monitors.Primary())
-        {
-            area.y += m_bar.Height();
-            area.height -= m_bar.Height();
-        }
+        area.y += barHeight;
+        area.height -= barHeight;
 
         monitor->SetWorkArea(area);
     }
@@ -1446,25 +1609,23 @@ void WindowManager::SwitchWorkspaceOnMonitor(Monitor& monitor, int id)
     if (current && current->Id() == id)
         return; // already showing it - nothing to do
 
-    // Workspace Assignment: switching workspace on one monitor must
-    // NOT affect other monitors - if `id` is already active somewhere
-    // else, the only way to honour that *and* still switch `monitor`
-    // to it is to swap the two monitors' active workspaces, rather
-    // than ever letting the same workspace show on two monitors at
-    // once (which would make "switching workspace on one monitor"
-    // implicitly steal it out from under whichever other monitor was
-    // showing it) or silently refusing the switch outright.
+    // Workspace conflicts: switching workspace on one monitor must
+    // NOT affect other monitors, and a workspace already visible
+    // somewhere else is never swapped, stolen, or silently
+    // reassigned - i3-style, the request is simply rejected outright,
+    // with a notification on the *requesting* monitor's own bar so
+    // it's obvious why nothing happened.
     if (Monitor* other = MonitorShowing(id))
     {
-        Workspace* othersCurrent = other->ActiveWorkspace();
+        ShowNotificationOnMonitor(
+            monitor,
+            "Workspace " + std::to_string(id) + " is already visible on monitor " +
+                std::to_string(other->Id()));
 
-        other->SetWorkspace(current);
-        monitor.SetWorkspace(othersCurrent);
+        return;
     }
-    else
-    {
-        monitor.SetWorkspace(&m_workspaces.Get(id));
-    }
+
+    monitor.SetWorkspace(&m_workspaces.Get(id));
 
     // Arrange() is what actually unmaps whatever either monitor was
     // just showing and maps/positions whatever it's showing now - see
@@ -1477,6 +1638,17 @@ void WindowManager::SwitchWorkspaceOnMonitor(Monitor& monitor, int id)
     Arrange();
 
     FocusMonitor(monitor);
+}
+
+void WindowManager::ShowNotificationOnMonitor(Monitor& monitor, const std::string& text)
+{
+    if (Bar* bar = BarFor(monitor))
+    {
+        bar->ShowNotification(text);
+        bar->Redraw();
+    }
+
+    Logger::Info(text);
 }
 
 Monitor& WindowManager::FocusedMonitor() const
@@ -1522,13 +1694,11 @@ void WindowManager::FocusMonitor(Monitor& monitor)
 
     // Nothing on this monitor to focus - clear real X input focus
     // (Focus(id) is never reached to do it for us) while still making
-    // sure the bar reflects the workspace this monitor is now showing.
+    // sure every bar reflects current state.
     m_repository.ClearFocus();
     m_connection.SetInputFocus(m_connection.Root());
     m_connection.SetActiveWindow(m_atoms, None);
-    m_bar.SetTitle("");
-    m_bar.SetWorkspaces(m_workspaces.Count(), workspace ? workspace->Id() : 0);
-    m_bar.Redraw();
+    UpdateAllBars();
 }
 
 void WindowManager::FocusMonitorCommand(const std::string& arg)
@@ -1803,7 +1973,6 @@ void WindowManager::ToggleFloating()
         window->SetWorkspace(FocusedWorkspaceId());
         window->SetMonitor(FocusedMonitor().Id());
         window->SetState(WindowState::Floating);
-        m_bar.SetScratchpadActive(false);
     }
     else if (window->IsTiled())
     {
@@ -1914,21 +2083,17 @@ void WindowManager::ToggleScratchpadForFocused()
         RaiseModalWindows();
 
         Focus(window->Id());
-
-        m_bar.SetScratchpadActive(true);
-        m_bar.Redraw();
+        UpdateAllBars();
     }
     else
     {
         window->IgnoreNextUnmap();
         m_connection.UnmapWindow(window->Id());
 
-        m_bar.SetScratchpadActive(false);
-
         if (window->Focused())
             FocusNextAvailable();
 
-        m_bar.Redraw();
+        UpdateAllBars();
     }
 }
 
@@ -2145,8 +2310,7 @@ void WindowManager::ToggleNotepad()
     m_focusBeforeModal = focused ? focused->Id() : 0;
 
     m_notepad.Open();
-    m_bar.SetNotepadActive(true);
-    m_bar.Redraw();
+    UpdateAllBars();
     m_connection.SetInputFocus(m_notepad.WindowId());
 }
 
@@ -2156,8 +2320,7 @@ void WindowManager::CloseNotepad()
         return;
 
     m_notepad.Close();
-    m_bar.SetNotepadActive(m_notepad.HasContent());
-    m_bar.Redraw();
+    UpdateAllBars();
 
     RestoreFocusAfterModal();
 }
@@ -2529,9 +2692,111 @@ void WindowManager::RelocateOrphanedFloatingWindows()
 
 void WindowManager::HandleMonitorTopologyChanged()
 {
+    RebuildBars();
     RefreshMonitorWorkAreas();
     RelocateOrphanedFloatingWindows();
     Arrange();
+}
+
+void WindowManager::RebuildBars()
+{
+    // Every monitor MonitorManager still reports gets counted as "kept
+    // or new" below - one raw-pointer scan, then a lookup per existing
+    // entry, both O(number of monitors), never more than a handful.
+    std::vector<Monitor*> current;
+
+    for (const auto& monitor : m_monitors.All())
+        current.push_back(monitor.get());
+
+    // Tear down any bar whose monitor is gone.
+    for (auto it = m_bars.begin(); it != m_bars.end(); )
+    {
+        if (std::find(current.begin(), current.end(), it->first) == current.end())
+        {
+            it->second->Hide();
+            it = m_bars.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    // Create (or just reconfigure the geometry of) one for every
+    // monitor that's here now.
+    for (Monitor* monitor : current)
+    {
+        auto it = m_bars.find(monitor);
+
+        if (it == m_bars.end())
+        {
+            auto bar = std::make_unique<Bar>(m_connection);
+            bar->Configure(m_config, monitor->Geometry());
+            bar->Show();
+
+            it = m_bars.emplace(monitor, std::move(bar)).first;
+        }
+        else
+        {
+            it->second->Configure(m_config, monitor->Geometry());
+        }
+    }
+
+    // The system tray is a single, X11-wide selection (see
+    // SystemTray.h) - it can only ever live on one bar, so it always
+    // follows whichever monitor is Primary() right now.
+    if (Bar* primaryBar = BarFor(m_monitors.Primary()))
+        primaryBar->AttachSystemTray(&m_tray);
+}
+
+Bar* WindowManager::BarFor(Monitor& monitor) const
+{
+    auto it = m_bars.find(&monitor);
+
+    return it != m_bars.end() ? it->second.get() : nullptr;
+}
+
+Bar* WindowManager::BarWindowMatching(::Window id) const
+{
+    for (const auto& [monitor, bar] : m_bars)
+        if (bar->WindowId() == id)
+            return bar.get();
+
+    return nullptr;
+}
+
+void WindowManager::UpdateAllBars()
+{
+    ManagedWindow* focusedWindow = m_repository.Focused();
+    Monitor* focusedMonitor = m_monitors.Focused();
+
+    bool scratchpadActive = m_scratchpad.HasWindow() && m_scratchpad.IsVisible();
+    bool notepadActive = m_notepad.HasContent();
+
+    for (const auto& monitor : m_monitors.All())
+    {
+        Bar* bar = BarFor(*monitor);
+
+        if (!bar)
+            continue;
+
+        Workspace* workspace = monitor->ActiveWorkspace();
+
+        bar->SetWorkspaces(m_workspaces.Count(), workspace ? workspace->Id() : 0);
+
+        // Only the focused monitor has a genuine "currently focused
+        // window" of its own right now - real X input focus is
+        // singular. Showing the same title on every monitor's bar
+        // (what a single global bar always effectively did) would
+        // misrepresent every *other* monitor as if it were also
+        // focused; showing nothing there instead is honest about it.
+        bar->SetTitle(monitor.get() == focusedMonitor && focusedWindow ? focusedWindow->Title() : "");
+
+        bar->SetScratchpadActive(scratchpadActive);
+        bar->SetNotepadActive(notepadActive);
+
+        bar->Redraw();
+    }
 }
 
 WindowRuleEffect WindowManager::ResolveWindowRules(

@@ -21,6 +21,8 @@
 
 #include <X11/Xlib.h>
 
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -89,6 +91,15 @@ public:
     void HandleEnterNotify(const XCrossingEvent& event);
     void HandlePropertyNotify(const XPropertyEvent& event);
 
+    // Ambient pointer tracking (root has PointerMotionMask selected
+    // whether or not a Super+drag is in progress - see XConnection::
+    // BecomeWindowManager()) - MouseManager calls this itself whenever
+    // it sees a MotionNotify while no drag is active, purely so
+    // "focused monitor" can follow the cursor across bare desktop
+    // between monitors, not just across window boundaries (which
+    // HandleEnterNotify already covers). See UpdateFocusedMonitorFromPointer().
+    void HandlePointerMotion(const XMotionEvent& event);
+
     // Second line of defence against focus-stealing while the
     // Launcher/Notepad is open (the first is Manage() not calling
     // Focus() on a newly-mapped window in the first place) - catches
@@ -128,6 +139,18 @@ public:
     // --- MouseManager-facing API --------------------------------------------
 
     ManagedWindow* WindowAt(const Point& point);
+
+    // The topmost *floating* window whose rect contains `point`, if
+    // any - checked by MouseManager before WindowAt() (which only ever
+    // hit-tests the tiled BSP tree) so a Super+LMB press actually picks
+    // up a floating window sitting visually on top of a tile, instead
+    // of grabbing the tile underneath it. Prefers the currently-focused
+    // window if it's a match (the most likely thing the user meant to
+    // grab); otherwise approximates "topmost" by the same iteration
+    // order ArrangeMonitor() raises floating windows in, since nothing
+    // here tracks real X11 stacking order beyond that.
+    ManagedWindow* FloatingWindowAt(const Point& point) const;
+
     void SwapWindows(ManagedWindow* first, ManagedWindow* second);
     void ResizeWindow(ManagedWindow* window, int dx, int dy);
     void SetResizingCursor(bool resizing);
@@ -137,6 +160,19 @@ public:
     void BeginSwapDrag(ManagedWindow* window, const Point& cursor);
     void UpdateSwapDrag(ManagedWindow* window, const Point& cursor);
     void EndSwapDrag(ManagedWindow* window, const Point& cursor);
+
+    // The floating-window equivalent of the Swap-drag trio above - a
+    // plain 1:1 follow-the-cursor move rather than a pick-up-and-swap,
+    // since a floating window has no tiled slot to swap. Live monitor
+    // crossing (see requirement 3): every UpdateFloatingDrag() checks
+    // which monitor the window's center now sits over and re-homes it
+    // onto that monitor's own active workspace immediately, without
+    // waiting for release - "drag across the boundary, it belongs to
+    // the new monitor" - only its on-screen position is left exactly
+    // where the cursor put it until EndFloatingDrag() clamps/finalizes it.
+    void BeginFloatingDrag(ManagedWindow* window, const Point& cursor);
+    void UpdateFloatingDrag(ManagedWindow* window, const Point& cursor);
+    void EndFloatingDrag(ManagedWindow* window, const Point& cursor);
 
     // --- IPCServer-facing API ------------------------------------------------
 
@@ -195,25 +231,52 @@ private:
     // better at call sites that only care about the yes/no.
     bool IsWorkspaceVisible(int workspaceId) const;
 
-    // Moves keyboard/placement focus to `monitor` itself (Super+drag
-    // and click-to-focus already do this implicitly via Focus(), see
-    // HandleEnterNotify()/HandleButtonPressOnClient(); this is the
-    // explicit `focusmonitor` command's target) - focuses whatever was
-    // last visible there, or clears focus if it has nothing.
+    // Moves keyboard/placement focus to `monitor` itself - the engine
+    // behind *every* way focus can move to a different monitor: the
+    // pointer entering a window there (HandleEnterNotify()), the
+    // pointer merely crossing into its bare desktop
+    // (UpdateFocusedMonitorFromPointer(), see below - this is the
+    // primary mechanism now; there is deliberately no default keybind
+    // for this anymore, see FocusMonitorCommand()'s comment), or the
+    // explicit `focusmonitor` command for anyone who still wants to
+    // bind one. Focuses whatever was last visible there, or clears
+    // focus if it has nothing.
     void FocusMonitor(Monitor& monitor);
+
+    // Resolves `monitor`'s Containing() monitor and calls FocusMonitor()
+    // if it's not already the focused one - the single chokepoint both
+    // HandleEnterNotify() (crossing into a window) and
+    // HandlePointerMotion() (crossing bare desktop) funnel through, so
+    // "which monitor last saw the pointer" can never disagree between
+    // the two. A no-op if the pointer is transiently outside every
+    // known monitor rect (e.g. mid-hotplug) or already on the focused one.
+    void UpdateFocusedMonitorFromPointer(const Point& pointer);
+
+    // `focusmonitor`/`movetomonitor` remain fully functional commands
+    // (kohikoctl, or a bind someone adds back themselves) - they're
+    // just not bound by default anymore now that the pointer crossing
+    // into a monitor is what focuses it in normal use (see
+    // UpdateFocusedMonitorFromPointer()).
     void FocusMonitorCommand(const std::string& arg);
 
-    // Switches `monitor`'s own active workspace to `id`, leaving
-    // every other monitor's completely untouched - see the class
-    // comment on why this replaced the old single global "current
-    // workspace" model. If `id` is already active on some *other*
-    // monitor, the two monitors swap active workspaces instead of
-    // ever showing the same one twice (matches i3's `workspace <n>`
-    // behaviour) - either way, no workspace ever silently vanishes
-    // off-screen just because the id you asked for happened to
-    // already be visible somewhere else.
+    // Switches `monitor`'s own active workspace to `id`, leaving every
+    // other monitor's completely untouched - see the class comment on
+    // why this replaced the old single global "current workspace"
+    // model. If `id` is already active on some *other* monitor, the
+    // request is rejected outright - a notification is shown on
+    // `monitor`'s own bar (see ShowNotificationOnMonitor()) and nothing
+    // else changes. i3-style: workspaces never silently swap or get
+    // stolen out from under the monitor already showing one just
+    // because another monitor asked for it too.
     void SwitchWorkspace(int id);
     void SwitchWorkspaceOnMonitor(Monitor& monitor, int id);
+
+    // Shows `text` on `monitor`'s own bar for a few seconds (in place
+    // of its title) - Tick() keeps redrawing it until the notification
+    // expires. Used for a rejected workspace-switch request (see
+    // SwitchWorkspaceOnMonitor()) - could grow other uses later, but
+    // that's the only one today.
+    void ShowNotificationOnMonitor(Monitor& monitor, const std::string& text);
 
     void MoveFocusedToWorkspace(int id);
 
@@ -260,12 +323,43 @@ private:
     Rect TilingArea(Monitor& monitor);
 
     // Recomputes every monitor's WorkArea() from its Geometry() minus
-    // whatever screen-edge furniture Kohiko reserves there (currently
-    // just the bar, and currently only ever on Primary() - see Bar.h).
-    // Called at the top of Arrange() and whenever the bar's configured
-    // height might have changed (ReloadConfig(), a hotplug that
-    // changed which monitor is Primary()).
+    // the bar it hosts - every monitor gets its own bar now (see
+    // RebuildBars()), so this reserves space on all of them, not just
+    // Primary(). Called at the top of Arrange() and whenever the bar's
+    // configured height might have changed (ReloadConfig()).
     void RefreshMonitorWorkAreas();
+
+    // Creates/destroys Bar instances to match the current monitor set,
+    // keyed by Monitor* so a monitor that merely changed geometry (as
+    // opposed to actually disconnecting) keeps its same Bar rather than
+    // flickering through a destroy/recreate. Called from Initialize()
+    // and from HandleMonitorTopologyChanged() after every hotplug.
+    // Re-attaches the system tray (a single, X11-wide selection - see
+    // SystemTray.h - so it can only ever live on *one* bar) to
+    // whichever bar now corresponds to Primary().
+    void RebuildBars();
+
+    // nullptr if `monitor` has no bar yet (shouldn't normally happen -
+    // RebuildBars() keeps every connected monitor's bar current - but
+    // callers that run mid-reconciliation should still check).
+    Bar* BarFor(Monitor& monitor) const;
+
+    // Whichever bar owns X window `id`, or nullptr if `id` isn't one -
+    // replaces the old single "id == m_bar.WindowId()" checks now that
+    // there's one per monitor.
+    Bar* BarWindowMatching(::Window id) const;
+
+    // Pushes each monitor's own workspace-count/active-id, its own
+    // title (the focused monitor shows whatever window actually holds
+    // real X input focus right now; every other monitor is left blank -
+    // X focus is singular, so an unfocused monitor has no genuine
+    // "focused window" of its own to show, and a stale one would be
+    // more misleading than nothing), and the (global) scratchpad/
+    // notepad indicator state to every bar, then redraws all of them -
+    // the multi-monitor replacement for the old single
+    // "m_bar.SetWorkspaces(...); m_bar.SetTitle(...); m_bar.Redraw();"
+    // call sites.
+    void UpdateAllBars();
 
     // Bug #4: before Insert()-ing a new tile, checks whether doing so
     // would shrink some area below the configured minimum. TryTile()
@@ -398,15 +492,15 @@ private:
 
     // Called once after MonitorManager::Detect() reports the monitor
     // *set* changed shape (see MonitorManager::Detect()'s return
-    // value) - refreshes work areas, relocates anything orphaned by a
-    // disconnected monitor, and re-arranges. Also the handler wired
-    // up as MonitorManager::SetBeforeMonitorRemovedCallback(), for
-    // anything that specifically needs to run *before* a Monitor
-    // object is actually destroyed (currently nothing does - see its
-    // definition for why the orphan sweep above is enough on its own -
-    // but the hook stays available for whatever "relocate affected
-    // windows safely" grows to mean later, e.g. once per-monitor bars
-    // exist and need tearing down here too).
+    // value) - refreshes work areas, rebuilds per-monitor bars (see
+    // RebuildBars()), relocates anything orphaned by a disconnected
+    // monitor, and re-arranges. Also the handler wired up as
+    // MonitorManager::SetBeforeMonitorRemovedCallback(), for anything
+    // that specifically needs to run *before* a Monitor object is
+    // actually destroyed (currently nothing does - the orphan sweep
+    // below runs after the fact and RebuildBars() itself handles
+    // tearing down that monitor's bar - but the hook stays available
+    // for whatever "relocate affected windows safely" grows to mean later).
     void HandleMonitorTopologyChanged();
 
     unsigned long ParseColor(const std::string& key, const std::string& fallback) const;
@@ -464,7 +558,13 @@ private:
     EventDispatcher m_dispatcher;
 
     IPCServer m_ipc;
-    Bar m_bar;
+
+    // One per connected monitor, keyed by Monitor* so a monitor that
+    // merely changes geometry keeps the same Bar object (Monitor*
+    // itself stays stable across that - see MonitorManager::Detect())
+    // rather than flickering through a destroy/recreate. Built/torn
+    // down by RebuildBars().
+    std::map<Monitor*, std::unique_ptr<Bar>> m_bars;
     SystemTray m_tray;
     Launcher m_launcher;
     Notepad m_notepad;
