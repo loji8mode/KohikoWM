@@ -1096,14 +1096,6 @@ void WindowManager::Manage(WindowID id)
 
     WindowRuleEffect rules = ResolveWindowRules(className, instanceName, window->Title());
 
-    // Stored on the window itself (not just used locally below) so
-    // every later capacity check - a workspace move, a monitor change,
-    // restoring from fullscreen, ... - keeps honouring `windowrule=tile`
-    // for this window's whole lifetime, not just this initial
-    // placement. See IgnoresOwnMinSizeForTiling()'s comment for why
-    // this needs to exist at all.
-    window->SetIgnoresOwnMinSizeForTiling(rules.forceTile);
-
     // A `windowrule=workspace:N` match ("open Telegram's media viewer
     // on its own dedicated workspace instead of cluttering whatever's
     // current" is the motivating example) has to land before the

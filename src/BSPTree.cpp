@@ -581,24 +581,34 @@ void BSPTree::EffectiveMinSize(
     int& outMinWidth,
     int& outMinHeight)
 {
+    // Deliberately floor-only, unconditionally, for every window this
+    // is ever called with - only tiled ("father") windows ever reach
+    // the BSP tree at all (a transient/dialog/utility "child" window,
+    // or one matching `windowrule=float`, never gets past
+    // WindowManager::Manage()'s wantsFloat check to be inserted here
+    // in the first place), and once tiled, Kohiko already force-resizes
+    // a window to whatever its tile says regardless of what it asked
+    // for (see HandleConfigureRequest) - a client's own declared
+    // WM_NORMAL_HINTS minimum was never actually a hard technical
+    // requirement, just a size Kohiko used to also *demand* be
+    // available before it would agree to tile the window at all. That
+    // demand is what caused a real app (Discord, Telegram - both
+    // declare a fairly large preferred minimum) to fall back to
+    // floating on a small/cramped monitor even though there was room
+    // for a smaller-than-preferred tile. So: no window's own
+    // preference is treated as a requirement here - only the ordinary
+    // general.min_tile_width/height floor is, for every window,
+    // unconditionally. A tiled window only ever becomes floating again
+    // through an explicit user action (SUPER+SPACE/toggle_floating -
+    // see ToggleFloating()) or the separate, narrower
+    // tiling-misbehavior escape valve for a client that keeps actively
+    // fighting its assigned tile size once it already has one (see
+    // ApplyTilingMisbehaviorFallback) - never merely because it asked
+    // for more than it was given.
+    (void)window;
+
     outMinWidth  = floorWidth;
     outMinHeight = floorHeight;
-
-    // `windowrule=tile` opts a window out of having its own declared
-    // minimum count here at all - see IgnoresOwnMinSizeForTiling()'s
-    // comment in ManagedWindow.h for why. Every other window (the
-    // overwhelming majority, since this defaults to false) behaves
-    // exactly as before.
-    if (window && !window->IgnoresOwnMinSizeForTiling())
-    {
-        // MinWidth()/MinHeight() default to 0 when a client never
-        // declared WM_NORMAL_HINTS, so max() here just falls through
-        // to the floor for the (very common) case of no declared
-        // preference, and only raises the bar when it actually
-        // declared something stricter than the floor.
-        outMinWidth  = std::max(outMinWidth,  window->MinWidth());
-        outMinHeight = std::max(outMinHeight, window->MinHeight());
-    }
 }
 
 bool BSPTree::FeasibleSplitDirection(

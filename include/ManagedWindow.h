@@ -151,27 +151,6 @@ public:
     int MinWidth() const;
     int MinHeight() const;
 
-    // Set once in Manage() from `windowrule=tile`'s forceTile (see
-    // WindowRuleEffect) and re-checked by every later capacity check
-    // (TryTile, FindWorkspaceWithRoom, HasSpaceForAnotherWindow, ...)
-    // via BSPTree::EffectiveMinSize(). `windowrule=tile` is documented
-    // as "always tile it, strictly" - but before this existed, a
-    // window with a large PMinSize hint of its own (WM_NORMAL_HINTS)
-    // could still get bounced to floating by the same room-shortage
-    // fallback every ordinary window is subject to, because
-    // EffectiveMinSize() folded that hint into the capacity check
-    // unconditionally. This makes `windowrule=tile` cap what the
-    // capacity check demands for this window down to the ordinary
-    // general.min_tile_width/height floor - the same floor Kohiko was
-    // always willing to force it to via MoveResizeWindow anyway (see
-    // the comment above GetMinSize() in WindowManager::Manage()) -
-    // instead of treating its own preferred size as a hard requirement
-    // when deciding whether a tile placement exists at all. Only ever
-    // true for a window an explicit rule opted in for, so every window
-    // without one keeps exactly the protection it always had.
-    void SetIgnoresOwnMinSizeForTiling(bool ignore);
-    bool IgnoresOwnMinSizeForTiling() const;
-
     // How many times, in a row since this window was last (re-)tiled,
     // its own ConfigureRequest has asked for geometry different from
     // the fixed tile Kohiko actually gave it - WindowManager's proxy
@@ -222,7 +201,6 @@ private:
 
     int m_minWidth = 0;
     int m_minHeight = 0;
-    bool m_ignoresOwnMinSizeForTiling = false;
 
     int m_tilingMisbehaviorCount = 0;
 

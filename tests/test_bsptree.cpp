@@ -210,49 +210,52 @@ int main()
     // 300x310 is very slightly taller than it is wide, so
     // DirectionForRect() picks Horizontal (split the height) as the
     // "natural" direction - which only gives each half ~153px of the
-    // 310px height, well short of the 170px minimum height this window
-    // wants. Splitting the *other* way (Vertical, splitting the 300px
-    // width instead) leaves height untouched at 310 (>= 170) and still
-    // clears the 100px minimum width on both ~148px-wide halves - so a
+    // 310px height, well short of the 170px floor this test asks for.
+    // Splitting the *other* way (Vertical, splitting the 300px width
+    // instead) leaves height untouched at 310 (>= 170) and still
+    // clears the 100px floor width on both ~148px-wide halves - so a
     // naive "only ever try the natural direction" implementation would
     // wrongly refuse this insertion, even though a perfectly good
-    // placement exists one axis over.
+    // placement exists one axis over. (A window's own declared
+    // WM_NORMAL_HINTS minimum is never consulted for this any more -
+    // see EffectiveMinSize() - only the ordinary floor passed in here
+    // ever gates a placement, which is why this drives the check via
+    // floorHeight=170 directly rather than G->SetMinSize().)
     ManagedWindow* F = makeWindow(6);
     ManagedWindow* G = makeWindow(7);
-    G->SetMinSize(100, 170);
 
     BSPTree altTree;
     altTree.Insert(F);
 
     Rect altArea{0, 0, 300, 310};
 
-    Check(altTree.HasSpaceForAnotherWindow(G, altArea, 4, 100, 60),
+    Check(altTree.HasSpaceForAnotherWindow(G, altArea, 4, 100, 170),
           "HasSpaceForAnotherWindow: alternative direction rescues an anchor "
           "that's infeasible in its own natural direction");
-    Check(altTree.Insert(G, altArea, 4, 100, 60),
+    Check(altTree.Insert(G, altArea, 4, 100, 170),
           "Insert(): the same alternative-direction placement actually succeeds");
     Check(altTree.Count() == 2, "count == 2 after the alternative-direction insert");
 
     layout.Apply(altTree.Root(), altArea, params);
     Check(F->Geometry().height >= 170 && G->Geometry().height >= 170,
-          "both panes still clear G's 170px minimum height after relayout");
+          "both panes still clear the 170px floor height after relayout");
     Check(F->Geometry().width >= 100 && G->Geometry().width >= 100,
-          "both panes still clear the 100px minimum width after relayout");
+          "both panes still clear the 100px floor width after relayout");
 
     std::printf("\n-- Insert() with placement (\"Shrink Existing Tiles\") --\n");
 
     // Two 250x250 panes side by side (H|I, root ratio 0.5, 4px gaps -
-    // usable = 500, so 250 each). A new window J that insists on a
-    // 300px-wide slot can't get one by splitting I alone - neither
-    // direction gives either resulting half 300px - but shrinking H
-    // down to the 100px floor frees up to 400px for I, and *that's*
-    // enough room to split Horizontally (I keeps the full 400px width,
-    // stacked panes) without ever taking H below the configured
-    // MIN_USABLE_TILE_WIDTH of 100px.
+    // usable = 500, so 250 each). A uniform 150px floor (applied to
+    // every window alike now - see EffectiveMinSize()) means a new
+    // window J can't get a slot by splitting I alone: either direction
+    // leaves I's own width unchanged or halved, and a plain 50/50 split
+    // of just I's 250px only gives ~123px per side - short of 150.
+    // Shrinking H down to the 150px floor frees enough of the shared
+    // 500px for I and J to split ~175px each once combined, clearing
+    // the floor on all three without ever taking H below it.
     ManagedWindow* H = makeWindow(8);
     ManagedWindow* I = makeWindow(9);
     ManagedWindow* J = makeWindow(10);
-    J->SetMinSize(300, 100);
 
     BSPTree reclaimTree;
     reclaimTree.Insert(H);
@@ -265,31 +268,30 @@ int main()
     reclaimParams.borderWidth = 0;
 
     layout.Apply(reclaimTree.Root(), reclaimArea, reclaimParams);
-    Check(I->Geometry().width < 300,
-          "sanity check: I's plain 50/50 share (~250px) is under J's 300px requirement");
+    Check(I->Geometry().width < 150 * 2,
+          "sanity check: I's plain 50/50 share (~250px) can't just be re-split in half and still clear the 150px floor");
 
-    Check(reclaimTree.HasSpaceForAnotherWindow(J, reclaimArea, 4, 100, 60),
-          "HasSpaceForAnotherWindow: shrinking H down to the 100px floor is enough to fit J");
-    Check(reclaimTree.Insert(J, reclaimArea, 4, 100, 60),
+    Check(reclaimTree.HasSpaceForAnotherWindow(J, reclaimArea, 4, 150, 60),
+          "HasSpaceForAnotherWindow: shrinking H down to the 150px floor is enough to fit J");
+    Check(reclaimTree.Insert(J, reclaimArea, 4, 150, 60),
           "Insert(): the same shrink-existing-tiles placement actually succeeds");
     Check(reclaimTree.Count() == 3, "count == 3 after the reclaim-based insert");
 
     layout.Apply(reclaimTree.Root(), reclaimArea, reclaimParams);
-    Check(H->Geometry().width >= 100,
-          "H was shrunk to make room, but never below the 100px floor");
-    Check(J->Geometry().width >= 300 && J->Geometry().height >= 100,
-          "J actually got the 300x100 slot it required");
+    Check(H->Geometry().width >= 150,
+          "H was shrunk to make room, but never below the 150px floor");
+    Check(J->Geometry().width >= 150 && J->Geometry().height >= 60,
+          "J actually got a slot that clears the floor");
 
     // Negative case: nothing (however extreme) reclaims 600px out of a
     // 504px-wide area - Insert() must leave the tree completely
     // untouched rather than silently violating the floor to "make it
     // work" anyway.
     ManagedWindow* K = makeWindow(11);
-    K->SetMinSize(600, 100);
 
-    Check(!reclaimTree.HasSpaceForAnotherWindow(K, reclaimArea, 4, 100, 60),
+    Check(!reclaimTree.HasSpaceForAnotherWindow(K, reclaimArea, 4, 600, 60),
           "HasSpaceForAnotherWindow: correctly refuses a 600px requirement no reclaim can satisfy");
-    Check(!reclaimTree.Insert(K, reclaimArea, 4, 100, 60),
+    Check(!reclaimTree.Insert(K, reclaimArea, 4, 600, 60),
           "Insert(): correctly refuses the same impossible placement, touching nothing");
     Check(reclaimTree.Count() == 3, "count is still 3 - the failed Insert() didn't mutate the tree");
 
