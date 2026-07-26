@@ -92,9 +92,25 @@ void MouseManager::HandlePress(
 
     if (Matches(m_resizeBinding, event.state, event.button))
     {
-        m_dragWindow = m_windowManager.WindowAt(point);
         m_lastX = event.x_root;
         m_lastY = event.y_root;
+
+        // Same "check for a floating window on top first" reasoning as
+        // the swap/move binding above - grabbing near a floating
+        // window's edge should resize *it*, not the tile sitting
+        // underneath it.
+        ManagedWindow* floating = m_windowManager.FloatingWindowAt(point);
+
+        if (floating)
+        {
+            m_dragWindow = floating;
+            m_mode = DragMode::FloatingResize;
+            m_windowManager.SetResizingCursor(true);
+            m_windowManager.BeginFloatingResize(m_dragWindow, point);
+            return;
+        }
+
+        m_dragWindow = m_windowManager.WindowAt(point);
 
         if (!m_dragWindow)
             return;
@@ -141,6 +157,10 @@ void MouseManager::HandleMotion(
 
         m_windowManager.ResizeWindow(m_dragWindow, dx, dy);
     }
+    else if (m_mode == DragMode::FloatingResize)
+    {
+        m_windowManager.UpdateFloatingResize(m_dragWindow, point);
+    }
 
     m_lastX = event.x_root;
     m_lastY = event.y_root;
@@ -161,6 +181,12 @@ void MouseManager::HandleRelease(
     }
     else if (m_mode == DragMode::Resize)
     {
+        m_windowManager.SetResizingCursor(false);
+    }
+    else if (m_mode == DragMode::FloatingResize && m_dragWindow)
+    {
+        Point point{event.x_root, event.y_root};
+        m_windowManager.EndFloatingResize(m_dragWindow, point);
         m_windowManager.SetResizingCursor(false);
     }
 

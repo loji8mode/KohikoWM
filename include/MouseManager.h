@@ -31,8 +31,15 @@ class ManagedWindow;
 //        monitor it's currently over as it crosses (see
 //        WindowManager::UpdateFloatingDrag()) -> release -> it stays
 //        exactly there, clamped to its final monitor
-//   RMB: press -> hit-test a leaf -> cursor moves -> feed the pixel
-//        delta straight into Resize() every motion event -> repeat
+//   RMB on a tiled window:     press -> hit-test a leaf -> cursor
+//        moves -> feed the pixel delta straight into Resize() every
+//        motion event -> repeat
+//   RMB on a floating window:  press -> hit-test the topmost floating
+//        window under the cursor -> WindowManager grows/shrinks
+//        whichever edge(s) it was grabbed nearest to, live, on every
+//        motion event, anchoring the opposite edge(s) in place (see
+//        WindowManager::UpdateFloatingResize()) -> release -> it stays
+//        exactly that size, clamped to its minimum and its monitor
 //
 // Also the entry point for ambient pointer tracking: every
 // MotionNotify that arrives while no drag is active (root has
@@ -80,7 +87,8 @@ private:
         Idle,
         Swap,
         Move,
-        Resize
+        Resize,
+        FloatingResize
     };
 
     bool Matches(

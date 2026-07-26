@@ -898,6 +898,61 @@ void WindowManager::EndFloatingDrag(ManagedWindow* window, const Point& cursor)
     Arrange();
 }
 
+void WindowManager::BeginFloatingResize(ManagedWindow* window, const Point& cursor)
+{
+    if (!window || !window->IsFloating())
+        return;
+
+    m_activeResizeWindow = window;
+    m_resizeStartRect = window->Geometry();
+    m_resizeStartCursor = cursor;
+
+    // Whichever half of the window (horizontally and vertically) the
+    // cursor grabbed decides which edge(s) move for the rest of this
+    // drag - grabbing the left half resizes from the left, the right
+    // half from the right, and a corner does both axes at once, the
+    // same convention as dragging a border on any other floating WM.
+    Point center(m_resizeStartRect.CenterX(), m_resizeStartRect.CenterY());
+    m_resizeFromLeft = cursor.x < center.x;
+    m_resizeFromTop  = cursor.y < center.y;
+
+    m_connection.Raise(window->Id());
+    RaiseModalWindows();
+}
+
+void WindowManager::UpdateFloatingResize(ManagedWindow* window, const Point& cursor)
+{
+    if (!window || window != m_activeResizeWindow)
+        return;
+
+    Monitor* shownOn = MonitorShowing(window->Workspace());
+    Monitor& monitor = shownOn ? *shownOn : FocusedMonitor();
+
+    Rect rect = ResizedFloatingRect(window, cursor, monitor);
+
+    m_connection.MoveResizeWindow(window->Id(), rect);
+    window->SetGeometry(rect);
+}
+
+void WindowManager::EndFloatingResize(ManagedWindow* window, const Point& cursor)
+{
+    if (!window || window != m_activeResizeWindow)
+        return;
+
+    Monitor* shownOn = MonitorShowing(window->Workspace());
+    Monitor& monitor = shownOn ? *shownOn : FocusedMonitor();
+
+    Rect rect = ResizedFloatingRect(window, cursor, monitor);
+
+    m_connection.MoveResizeWindow(window->Id(), rect);
+    window->SetGeometry(rect);
+    window->SetFloatingGeometry(rect);
+
+    m_activeResizeWindow = nullptr;
+
+    Arrange();
+}
+
 // --- IPCServer-facing API ---------------------------------------------------
 
 std::string WindowManager::HandleIpcCommand(const std::string& request)
@@ -2598,6 +2653,102 @@ Rect WindowManager::CenteredFloatingRectForWindow(
     }
 
     return rect.ClampedTo(geometry, borderWidth);
+}
+
+Rect WindowManager::ResizedFloatingRect(
+    ManagedWindow* window,
+    const Point& cursor,
+    Monitor& monitor) const
+{
+    int dx = cursor.x - m_resizeStartCursor.x;
+    int dy = cursor.y - m_resizeStartCursor.y;
+
+    // Same floor TryTile() enforces for a tiled window - a window's
+    // own declared minimum (WM_NORMAL_HINTS) where it's stricter than
+    // the configured general default, otherwise the configured default
+    // itself.
+    int floorWidth  = m_config.GetInt("general.min_tile_width", 100);
+    int floorHeight = m_config.GetInt("general.min_tile_height", 60);
+
+    int minWidth  = std::max(floorWidth,  window ? window->MinWidth()  : 0);
+    int minHeight = std::max(floorHeight, window ? window->MinHeight() : 0);
+
+    int borderWidth = window ? window->BorderWidth() : 0;
+    int footprint = borderWidth * 2;
+
+    const Rect& bounds = monitor.WorkArea();
+
+    Rect rect = m_resizeStartRect;
+
+    // Each axis is handled independently: find where the moving edge
+    // wants to land, clamp it to the monitor first, then pull it back
+    // toward the anchored edge if that would leave less than the
+    // minimum size - the anchored edge itself is never touched either
+    // way, which is what keeps it visually pinned in place.
+    if (m_resizeFromLeft)
+    {
+        int rightEdge = m_resizeStartRect.Right();
+        int leftEdge  = m_resizeStartRect.x + dx;
+
+        if (leftEdge < bounds.x)
+            leftEdge = bounds.x;
+
+        if (rightEdge - leftEdge < minWidth)
+            leftEdge = rightEdge - minWidth;
+
+        rect.x     = leftEdge;
+        rect.width = rightEdge - leftEdge;
+    }
+    else
+    {
+        int leftEdge  = m_resizeStartRect.x;
+        int rightEdge = m_resizeStartRect.Right() + dx;
+
+        int maxRightEdge = bounds.Right() - footprint;
+
+        if (rightEdge > maxRightEdge)
+            rightEdge = maxRightEdge;
+
+        if (rightEdge - leftEdge < minWidth)
+            rightEdge = leftEdge + minWidth;
+
+        rect.width = rightEdge - leftEdge;
+    }
+
+    if (m_resizeFromTop)
+    {
+        int bottomEdge = m_resizeStartRect.Bottom();
+        int topEdge    = m_resizeStartRect.y + dy;
+
+        if (topEdge < bounds.y)
+            topEdge = bounds.y;
+
+        if (bottomEdge - topEdge < minHeight)
+            topEdge = bottomEdge - minHeight;
+
+        rect.y      = topEdge;
+        rect.height = bottomEdge - topEdge;
+    }
+    else
+    {
+        int topEdge    = m_resizeStartRect.y;
+        int bottomEdge = m_resizeStartRect.Bottom() + dy;
+
+        int maxBottomEdge = bounds.Bottom() - footprint;
+
+        if (bottomEdge > maxBottomEdge)
+            bottomEdge = maxBottomEdge;
+
+        if (bottomEdge - topEdge < minHeight)
+            bottomEdge = topEdge + minHeight;
+
+        rect.height = bottomEdge - topEdge;
+    }
+
+    if (rect.width  < 1) rect.width  = 1;
+    if (rect.height < 1) rect.height = 1;
+
+    return rect;
 }
 
 Rect WindowManager::RelocateRectToMonitor(

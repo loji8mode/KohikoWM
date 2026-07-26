@@ -484,12 +484,18 @@ These are the gestures the whole layout is built around:
   transfers it onto the destination monitor's workspace immediately,
   live, mid-drag (see [Multi-monitor](#multi-monitor)); releasing the
   button clamps it to stay fully on whichever monitor it ends up over.
-- **`Super` + right-click and drag** resizes: the window you grabbed grows
-  or shrinks in whichever direction you drag it, and its neighbour shrinks
-  or grows to match, exactly like dragging the divider between them -
-  updated on every reported mouse movement with no queued-up lag, even
-  under a fast/laggy pointer (Kohiko collapses a backlog of motion events
-  down to the latest one rather than working through it one at a time).
+- **`Super` + right-click and drag** resizes: on a *tiled* window, the
+  window you grabbed grows or shrinks in whichever direction you drag
+  it, and its neighbour shrinks or grows to match, exactly like
+  dragging the divider between them - updated on every reported mouse
+  movement with no queued-up lag, even under a fast/laggy pointer
+  (Kohiko collapses a backlog of motion events down to the latest one
+  rather than working through it one at a time). On a *floating*
+  window it resizes that window directly instead - whichever edge(s)
+  you grabbed nearest to (an edge, or a corner for both axes at once)
+  grow or shrink with the cursor while the opposite edge(s) stay put,
+  clamped to the window's own minimum size and to whichever monitor
+  it's on.
 
 Both left-click gestures share one bind (`mouse.swap=`, default
 `SUPER+BTN1`) - which one happens just depends on whether the window

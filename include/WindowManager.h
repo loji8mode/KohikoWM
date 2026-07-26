@@ -174,6 +174,25 @@ public:
     void UpdateFloatingDrag(ManagedWindow* window, const Point& cursor);
     void EndFloatingDrag(ManagedWindow* window, const Point& cursor);
 
+    // The floating-window equivalent of RMB resize - ResizeWindow()
+    // above only ever means "adjust the BSP divider ratio between two
+    // tiled siblings", which has no meaning for a window that isn't in
+    // the tree at all (a floating window's own Resize() call on the
+    // tree simply finds no leaf and silently no-ops). Instead,
+    // whichever edge(s) of the window are closest to the point it was
+    // grabbed at grow/shrink live with the cursor, and the opposite
+    // edge(s) stay anchored in place, exactly like dragging a border
+    // on any other floating window manager - grab near the right edge
+    // to resize width only, near a corner to resize both axes at once.
+    // Clamped throughout to the window's own declared minimum size
+    // (falling back to general.min_tile_width/height, same floor
+    // TryTile() enforces) and to the bounds of whichever monitor it's
+    // currently on, so it can never be resized down to nothing or out
+    // past the edge of the screen.
+    void BeginFloatingResize(ManagedWindow* window, const Point& cursor);
+    void UpdateFloatingResize(ManagedWindow* window, const Point& cursor);
+    void EndFloatingResize(ManagedWindow* window, const Point& cursor);
+
     // --- IPCServer-facing API ------------------------------------------------
 
     std::string HandleIpcCommand(const std::string& request);
@@ -463,6 +482,21 @@ private:
         ManagedWindow* parent = nullptr
     );
 
+    // Shared by UpdateFloatingResize()/EndFloatingResize(): recomputes
+    // `window`'s rect from m_resizeStartRect/m_resizeStartCursor/
+    // m_resizeFromLeft/m_resizeFromTop (set once in
+    // BeginFloatingResize()) and the current cursor position, then
+    // clamps it - first to `window`'s own effective minimum size
+    // (its declared MinWidth()/MinHeight(), floored by
+    // general.min_tile_width/height same as TryTile()), then to
+    // `monitor`'s WorkArea() - without ever moving the anchored
+    // edge(s) in the process.
+    Rect ResizedFloatingRect(
+        ManagedWindow* window,
+        const Point& cursor,
+        Monitor& monitor
+    ) const;
+
     // Re-centers/clamps a floating (or fullscreen-while-floating)
     // window's rect from one monitor's coordinate space into
     // another's, keeping it at the same *relative* position and size
@@ -591,6 +625,32 @@ private:
     int m_dragOffsetX = 0;
     int m_dragOffsetY = 0;
     Rect m_dragCurrentRect;
+
+    // Whichever floating window is currently being resized by a
+    // Super+RMB drag (nullptr the rest of the time) - kept entirely
+    // separate from m_activeDragWindow since a resize never touches
+    // the BSP tree the way a Swap drag does, and the two gestures
+    // never overlap in practice (MouseManager only ever has one drag
+    // in flight at once) but there's no reason to conflate their state.
+    ManagedWindow* m_activeResizeWindow = nullptr;
+
+    // The window's own geometry at the moment the resize began - every
+    // UpdateFloatingResize() computes the new rect from this fixed
+    // starting point and the total cursor delta since then, rather
+    // than accumulating small per-motion deltas, so the result can
+    // never drift from what the cursor actually did.
+    Rect m_resizeStartRect;
+    Point m_resizeStartCursor;
+
+    // Which edge(s) of m_resizeStartRect the cursor grabbed nearest to
+    // - decided once in BeginFloatingResize() from where inside the
+    // window the press landed, and fixed for the rest of that drag.
+    // Growing "from the left" moves x and shrinks width in step (the
+    // right edge stays put); growing "from the right" only changes
+    // width (the left edge stays put) - and the same for top/bottom
+    // against height.
+    bool m_resizeFromLeft = false;
+    bool m_resizeFromTop = false;
 
     // Whatever was focused right before the Launcher/Notepad opened,
     // so closing either one gives focus back rather than leaving
