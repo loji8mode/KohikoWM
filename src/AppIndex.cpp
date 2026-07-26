@@ -393,7 +393,7 @@ fs::path CacheFilePath()
 }
 
 constexpr const char kFieldSep = '\x1f';
-constexpr const char* kCacheVersion = "KOHIKO-APPINDEX 2";
+constexpr const char* kCacheVersion = "KOHIKO-APPINDEX 3";
 
 // Cached fields never contain real newlines (desktop entry values are
 // single-line) or the unit-separator byte in practice, but a rogue
