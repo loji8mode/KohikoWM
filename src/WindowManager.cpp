@@ -794,8 +794,21 @@ void WindowManager::Manage(WindowID id)
     // currently visible.
     if (window->Workspace() == m_workspaces.CurrentId())
     {
-        m_connection.MapWindow(id);
+        // Resize into its real tile slot *before* mapping, not after.
+        // A client (Java/Swing apps like TLauncher are the reliable
+        // reproducer, but it's not Java-specific) that gets mapped at
+        // its own small requested size and is then immediately
+        // resized larger can end up with its content stuck in the
+        // corner corresponding to that original size - the newly
+        // exposed area never gets painted, because the resize raced
+        // the client's own realization instead of being the size it
+        // was realized at in the first place. Configuring geometry on
+        // a not-yet-mapped window is perfectly legal (and is exactly
+        // what the floating branch above, and every other
+        // geometry-then-Map site in this file, already does) - Arrange()
+        // just needs to run before MapWindow() here too.
         Arrange();
+        m_connection.MapWindow(id);
 
         // A window opened while the Launcher/Notepad is up should
         // still tile in and become visible - just not take keyboard
@@ -1025,10 +1038,19 @@ void WindowManager::SwitchWorkspace(int id)
         m_connection.UnmapWindow(window->Id());
     }
 
+    // Arrange() before mapping, not after - see the matching comment
+    // in Manage(). Windows on this workspace that were opened while it
+    // was in the background never had MoveResizeWindow() applied to
+    // their actual X window (only the tree's cached rect was kept
+    // fresh, by RefreshWorkspaceGeometry()), so without this they'd be
+    // mapped at whatever size they were created at and resized to the
+    // real tile slot a moment later - the exact "content stuck in a
+    // corner" symptom, just triggered by switching workspaces instead
+    // of opening the window.
+    Arrange();
+
     for (ManagedWindow* window : m_repository.Visible(m_workspaces.CurrentId()))
         m_connection.MapWindow(window->Id());
-
-    Arrange();
 
     auto visible = m_repository.Visible(m_workspaces.CurrentId());
 
