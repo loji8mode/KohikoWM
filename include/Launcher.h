@@ -59,6 +59,11 @@ struct FileEntry
     std::string name;
     std::string path;
     bool isDirectory = false;
+
+    // Precomputed once by ScanHomeFiles(), not per keystroke - see
+    // Scoring::SplitWords()/BestFieldMatch() in LauncherScoring.h.
+    std::string nameLower;
+    std::vector<std::string> nameWords;
 };
 
 class Launcher

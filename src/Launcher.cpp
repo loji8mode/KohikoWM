@@ -246,6 +246,8 @@ std::vector<FileEntry> ScanHomeFiles()
             file.path = entry.path().string();
             file.name = entry.path().filename().string();
             file.isDirectory = entry.is_directory();
+            file.nameLower = Utils::Lower(file.name);
+            file.nameWords = Scoring::SplitWords(file.nameLower);
 
             files.push_back(std::move(file));
         }
@@ -903,7 +905,7 @@ void Launcher::UpdateMatches()
         {
             for (const auto& file : m_files)
             {
-                int score = Scoring::BestFieldMatch(queryLower, Utils::Lower(file.name));
+                int score = Scoring::BestFieldMatch(queryLower, file.nameLower, file.nameWords);
 
                 if (score == Scoring::kNoMatch)
                     continue;

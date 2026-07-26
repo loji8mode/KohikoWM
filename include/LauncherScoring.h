@@ -39,6 +39,11 @@ int PrefixMatch(const std::string& queryLower, const std::string& fieldLower);
 // `query` - e.g. "dev" matching the second word of "Developer Portal".
 int WordPrefixMatch(const std::string& queryLower, const std::string& fieldLower);
 
+// Same, but for a hot per-keystroke loop that already has `field`'s
+// word-split precomputed (see SplitWords()/BestFieldMatch() below) -
+// avoids re-splitting the same field on every keystroke.
+int WordPrefixMatch(const std::string& queryLower, const std::vector<std::string>& wordsLower);
+
 // Bullet 6: `query` appears anywhere inside `field` as one contiguous run.
 int SubstringMatch(const std::string& queryLower, const std::string& fieldLower);
 
@@ -76,7 +81,22 @@ int CamelCaseMatch(const std::string& queryLower, const std::string& humpInitial
 // is relative to other apps/fields.
 int BestFieldMatch(const std::string& queryLower, const std::string& fieldLower);
 
+// Same, but for a hot per-keystroke loop that already has `field`'s
+// word-split precomputed - see SplitWords() below. Used by Launcher's
+// $HOME file-search loop, where recomputing SplitWords() for every
+// file on every keystroke was profiled as the dominant cost of a
+// query (see Launcher.cpp's FileEntry/ScanHomeFiles).
+int BestFieldMatch(const std::string& queryLower, const std::string& fieldLower, const std::vector<std::string>& wordsLower);
+
 // --- shared helpers, exposed for testing and reuse ----------------
+
+// Splits an already-lower-cased field into "words" the way a person
+// reading it out loud would - not just whitespace (e.g. "disk-usage-
+// analyzer" splits into three words at the hyphens too). Exposed so
+// a caller with a large, unchanging field list can precompute this
+// once per field instead of paying for it on every WordPrefixMatch/
+// BestFieldMatch call.
+std::vector<std::string> SplitWords(const std::string& fieldLower);
 
 int LevenshteinDistance(const std::string& a, const std::string& b);
 

@@ -10,9 +10,6 @@
 namespace Kohiko::Scoring
 {
 
-namespace
-{
-
 // Splits an already-lower-cased field into "words" the way a person
 // reading it out loud would - not just whitespace (SplitWhitespace()
 // alone would miss "Developer Portal"'s hyphen/underscore-joined
@@ -44,8 +41,6 @@ std::vector<std::string> SplitWords(
     return words;
 }
 
-}
-
 int ExactMatch(
     const std::string& queryLower,
     const std::string& fieldLower)
@@ -72,20 +67,28 @@ int PrefixMatch(
 
 int WordPrefixMatch(
     const std::string& queryLower,
+    const std::vector<std::string>& wordsLower)
+{
+    if (queryLower.empty())
+        return kNoMatch;
+
+    for (std::size_t i = 0; i < wordsLower.size(); ++i)
+    {
+        if (wordsLower[i].size() > queryLower.size() && wordsLower[i].starts_with(queryLower))
+            return std::max(700, 800 - static_cast<int>(i) * 20);
+    }
+
+    return kNoMatch;
+}
+
+int WordPrefixMatch(
+    const std::string& queryLower,
     const std::string& fieldLower)
 {
     if (queryLower.empty())
         return kNoMatch;
 
-    std::vector<std::string> words = SplitWords(fieldLower);
-
-    for (std::size_t i = 0; i < words.size(); ++i)
-    {
-        if (words[i].size() > queryLower.size() && words[i].starts_with(queryLower))
-            return std::max(700, 800 - static_cast<int>(i) * 20);
-    }
-
-    return kNoMatch;
+    return WordPrefixMatch(queryLower, SplitWords(fieldLower));
 }
 
 int SubstringMatch(
@@ -254,7 +257,8 @@ int CamelCaseMatch(
 
 int BestFieldMatch(
     const std::string& queryLower,
-    const std::string& fieldLower)
+    const std::string& fieldLower,
+    const std::vector<std::string>& wordsLower)
 {
     if (queryLower.empty() || fieldLower.empty())
         return kNoMatch;
@@ -269,12 +273,22 @@ int BestFieldMatch(
 
     consider(ExactMatch(queryLower, fieldLower));
     consider(PrefixMatch(queryLower, fieldLower));
-    consider(WordPrefixMatch(queryLower, fieldLower));
+    consider(WordPrefixMatch(queryLower, wordsLower));
     consider(SubstringMatch(queryLower, fieldLower));
     consider(SubsequenceMatch(queryLower, fieldLower));
     consider(FuzzyMatch(queryLower, fieldLower));
 
     return best;
+}
+
+int BestFieldMatch(
+    const std::string& queryLower,
+    const std::string& fieldLower)
+{
+    if (queryLower.empty() || fieldLower.empty())
+        return kNoMatch;
+
+    return BestFieldMatch(queryLower, fieldLower, SplitWords(fieldLower));
 }
 
 std::string HumpInitials(

@@ -126,7 +126,7 @@ void IconResolver::LoadThemeChain(
         // in [Icon Theme]) when present; a handful of very old/minimal
         // themes omit it, in which case every other group in the file
         // is itself one directory entry, just in file order instead.
-        std::vector<std::string> directoryNames = index.GetList("Icon Theme", "Directories");
+        std::vector<std::string> directoryNames = index.GetList("Icon Theme", "Directories", ',');
 
         if (directoryNames.empty())
         {
@@ -160,7 +160,7 @@ void IconResolver::LoadThemeChain(
         // Recurse into whatever this theme inherits from *after*
         // adding it, keeping the chain in the right priority order
         // (this theme's own icons first, then its parents').
-        for (const auto& parent : index.GetList("Icon Theme", "Inherits"))
+        for (const auto& parent : index.GetList("Icon Theme", "Inherits", ','))
             LoadThemeChain(parent, visited);
 
         return; // found this theme's index.theme - no need to check the remaining base directories for it too
