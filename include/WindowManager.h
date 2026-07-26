@@ -180,7 +180,7 @@ private:
     // fallback search across the *other* workspaces when the current
     // one is full.
     bool TryTile(ManagedWindow* window, int workspaceId);
-    int FindWorkspaceWithRoom(int excludeId);
+    int FindWorkspaceWithRoom(ManagedWindow* window, int excludeId);
 
     // Recomputes and applies `window`'s border colour from its own
     // current focused/unfocused state - shared by Focus() (repainting

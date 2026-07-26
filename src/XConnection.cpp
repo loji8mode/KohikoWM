@@ -248,6 +248,15 @@ void XConnection::SendConfigureNotify(::Window window, const Rect& rect, int bor
     XSendEvent(m_display, window, False, StructureNotifyMask, reinterpret_cast<XEvent*>(&event));
 }
 
+void XConnection::ClearArea(::Window window)
+{
+    // width/height 0 means "to the edge of the window" from x,y - so
+    // 0,0,0,0 is the whole window. exposures=True is what actually
+    // asks the server to generate the Expose event(s); without it this
+    // would just repaint the window's background and stop there.
+    XClearArea(m_display, window, 0, 0, 0, 0, True);
+}
+
 void XConnection::ConfigureWindowRaw(::Window window, XWindowChanges changes, unsigned int valueMask)
 {
     XConfigureWindow(m_display, window, valueMask, &changes);
@@ -407,6 +416,24 @@ bool XConnection::GetPreferredSize(::Window window, int& width, int& height)
     {
         width = hints.base_width;
         height = hints.base_height;
+        return true;
+    }
+
+    return false;
+}
+
+bool XConnection::GetMinSize(::Window window, int& width, int& height)
+{
+    XSizeHints hints{};
+    long suppliedMask = 0;
+
+    if (!XGetWMNormalHints(m_display, window, &hints, &suppliedMask))
+        return false;
+
+    if ((hints.flags & PMinSize) && hints.min_width > 0 && hints.min_height > 0)
+    {
+        width = hints.min_width;
+        height = hints.min_height;
         return true;
     }
 

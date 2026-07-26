@@ -194,6 +194,24 @@ int ManagedWindow::BorderWidth() const
     return m_borderWidth;
 }
 
+void ManagedWindow::SetMinSize(
+    int width,
+    int height)
+{
+    m_minWidth = width;
+    m_minHeight = height;
+}
+
+int ManagedWindow::MinWidth() const
+{
+    return m_minWidth;
+}
+
+int ManagedWindow::MinHeight() const
+{
+    return m_minHeight;
+}
+
 void ManagedWindow::IgnoreNextUnmap()
 {
     ++m_ignoredUnmaps;

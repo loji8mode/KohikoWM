@@ -12,6 +12,7 @@
 
 #include <X11/Xatom.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <sstream>
 
@@ -181,7 +182,32 @@ void WindowManager::HandleConfigureRequest(const XConfigureRequestEvent& event)
 
     // Tiled: we own the geometry - acknowledge with what it actually
     // is so the client doesn't sit waiting for a reply.
-    m_connection.SendConfigureNotify(event.window, window->Geometry(), window->BorderWidth());
+    const Rect& actual = window->Geometry();
+    m_connection.SendConfigureNotify(event.window, actual, window->BorderWidth());
+
+    // A client that just asked for something *other* than what it's
+    // actually getting - TLauncher re-asserting its own preferred size
+    // mid-session is the reliable reproducer, e.g. right after its
+    // "restart to finish updating" flow swaps in a smaller splash/
+    // loading layout and tries to shrink to fit it - may well have
+    // already speculatively repainted itself at the size it asked for,
+    // before this refusal ever reaches it. Nothing about the window's
+    // real geometry changed here, so the server has no reason to
+    // generate an Expose on its own - without one, whatever the client
+    // already drew over its old content just sits there, orphaned in a
+    // corner of the real (unchanged, still fully tiled) window, which
+    // is exactly the "opens crooked" look. Only forcing this when the
+    // request actually asked for something different keeps it free for
+    // a well-behaved client that only ever confirms the size it
+    // already has.
+    bool askedForSomethingElse =
+        ((event.value_mask & CWX)      && event.x      != actual.x) ||
+        ((event.value_mask & CWY)      && event.y      != actual.y) ||
+        ((event.value_mask & CWWidth)  && event.width  != actual.width) ||
+        ((event.value_mask & CWHeight) && event.height != actual.height);
+
+    if (askedForSomethingElse)
+        m_connection.ClearArea(event.window);
 }
 
 void WindowManager::HandleUnmapNotify(const XUnmapEvent& event)
@@ -674,6 +700,23 @@ void WindowManager::Manage(WindowID id)
     window->SetMonitor(0);
     window->SetBorderWidth(m_config.GetInt("general.border_size", 2));
 
+    // Needed before TryTile() below - a client (TLauncher's real UI is
+    // the reliable reproducer) that declares a minimum size larger
+    // than the tile it ends up in will still get force-resized into
+    // that tile regardless (MoveResizeWindow isn't bound by the hint -
+    // only *interactive* resizing agents are expected to respect it),
+    // and unlike a client that's small enough to just look cramped,
+    // one whose layout can't actually fit below its own stated minimum
+    // clips content outright - parts of the GUI become genuinely
+    // inaccessible rather than just tight. TryTile()'s capacity check
+    // needs this so it can recognise "no, this one specifically needs
+    // more room than that" instead of only ever checking against the
+    // one-size-fits-all general.min_tile_width/height.
+    int minWidth = 0;
+    int minHeight = 0;
+    m_connection.GetMinSize(id, minWidth, minHeight);
+    window->SetMinSize(minWidth, minHeight);
+
     m_connection.SelectInputFor(id, EnterWindowMask | PropertyChangeMask | FocusChangeMask);
 
     // Plain (no Super) click-to-focus: sync-grabbed so we always get
@@ -726,7 +769,7 @@ void WindowManager::Manage(WindowID id)
     else
     {
         int currentWorkspace = window->Workspace();
-        int alternate = FindWorkspaceWithRoom(currentWorkspace);
+        int alternate = FindWorkspaceWithRoom(window, currentWorkspace);
 
         if (alternate != 0 && TryTile(window, alternate))
         {
@@ -1522,8 +1565,14 @@ bool WindowManager::TryTile(ManagedWindow* window, int workspaceId)
 
     int innerGap  = m_config.GetInt("general.inner_gap", 6);
     int outerGap  = m_config.GetInt("general.outer_gap", 8);
-    int minWidth  = m_config.GetInt("general.min_tile_width", 100);
-    int minHeight = m_config.GetInt("general.min_tile_height", 60);
+
+    // A client that's declared its own minimum usable size (queried
+    // once in Manage(), see the comment there) needs at least that
+    // much room, not just whatever the one-size-fits-all config
+    // default allows - otherwise it gets tiled into a slot it told us
+    // outright it can't render into without clipping content.
+    int minWidth  = std::max(m_config.GetInt("general.min_tile_width", 100), window->MinWidth());
+    int minHeight = std::max(m_config.GetInt("general.min_tile_height", 60), window->MinHeight());
 
     // Matches LayoutEngine::Apply's own Shrunk(outerGap) exactly, so
     // this check and the real layout can never disagree about what a
@@ -1548,12 +1597,12 @@ bool WindowManager::TryTile(ManagedWindow* window, int workspaceId)
     return true;
 }
 
-int WindowManager::FindWorkspaceWithRoom(int excludeId)
+int WindowManager::FindWorkspaceWithRoom(ManagedWindow* window, int excludeId)
 {
     int innerGap  = m_config.GetInt("general.inner_gap", 6);
     int outerGap  = m_config.GetInt("general.outer_gap", 8);
-    int minWidth  = m_config.GetInt("general.min_tile_width", 100);
-    int minHeight = m_config.GetInt("general.min_tile_height", 60);
+    int minWidth  = std::max(m_config.GetInt("general.min_tile_width", 100), window ? window->MinWidth() : 0);
+    int minHeight = std::max(m_config.GetInt("general.min_tile_height", 60), window ? window->MinHeight() : 0);
 
     Rect tilingArea = TilingArea().Shrunk(outerGap);
 

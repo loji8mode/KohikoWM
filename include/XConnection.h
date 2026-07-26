@@ -87,6 +87,15 @@ public:
     // (tiled windows): most toolkits still expect an acknowledgement.
     void SendConfigureNotify(::Window window, const Rect& rect, int borderWidth);
 
+    // Forces Expose event(s) covering a window's whole area without
+    // changing its geometry at all - the server only generates Expose
+    // on its own for a *real* geometry change, so a client that got
+    // its ConfigureRequest silently denied (see HandleConfigureRequest)
+    // and already repainted itself at the size it *asked* for gets no
+    // other prompt to redraw the rest of the window it actually still
+    // has.
+    void ClearArea(::Window window);
+
     // The one place a raw XWindowChanges/value-mask pair is
     // unavoidable: honouring a ConfigureRequest exactly as a floating
     // or not-yet-managed client asked for it.
@@ -138,6 +147,14 @@ public:
     // all, which callers should treat as "fall back to the window's
     // current/default size instead".
     bool GetPreferredSize(::Window window, int& width, int& height);
+
+    // The client's own declared *minimum* usable size, read from
+    // WM_NORMAL_HINTS (PMinSize) - what it's telling any resizing
+    // agent (interactive resize, or a tiling WM handing it a slot) is
+    // the smallest it can render itself into without clipping content.
+    // Returns false (leaving width/height untouched) if the client
+    // never declared one.
+    bool GetMinSize(::Window window, int& width, int& height);
 
     // --- grabs -----------------------------------------------------------
 

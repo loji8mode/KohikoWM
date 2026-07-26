@@ -136,6 +136,21 @@ public:
 
     int BorderWidth() const;
 
+    // The client's own declared minimum usable size, straight from
+    // WM_NORMAL_HINTS (PMinSize) - read once in Manage() and kept here
+    // so every later capacity check (TryTile, FindWorkspaceWithRoom,
+    // ToggleFloating back to tiled, ...) can defer to it without
+    // re-querying X every time. 0 means the client didn't declare one;
+    // callers fall back to the configured general.min_tile_width/
+    // height in that case, same as before this existed.
+    void SetMinSize(
+        int width,
+        int height
+    );
+
+    int MinWidth() const;
+    int MinHeight() const;
+
     // Called right before WindowManager unmaps this window itself
     // (workspace switch, scratchpad hide) so the resulting UnmapNotify
     // isn't mistaken for the client withdrawing/closing.
@@ -167,6 +182,9 @@ private:
     WindowState m_previousState = WindowState::Tiled;
 
     int m_borderWidth = 0;
+
+    int m_minWidth = 0;
+    int m_minHeight = 0;
 
     int m_ignoredUnmaps = 0;
 
