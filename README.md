@@ -160,6 +160,10 @@ exec.screenshot=flameshot gui    # referenced from `bind=Print exec screenshot`
 
 auto_start_programs=telegram-desktop discord zen-browser  # launched once at startup
 
+workspace1=zen-browser             # same idea, but pinned to a workspace - see Autostart below
+workspace2=discord telegram-desktop
+workspace3=steam
+
 keyboard.layouts=us,ua           # XKB layouts, applied via setxkbmap
 keyboard.layout_toggle=grp:alt_shift_toggle
 
@@ -176,9 +180,10 @@ monitor=HDMI-1,workspace=1              # see Multi-monitor below
 ```
 
 Reload after editing without restarting: `kohikoctl reload` (also bound to
-`Super+Shift+C` by default). `auto_start_programs` is the one exception -
-it only ever runs right after Kohiko itself starts, never on reload, so
-reloading the config doesn't relaunch every autostart program.
+`Super+Shift+C` by default). `auto_start_programs` and `workspace<N>=` are
+the one exception - both only ever run right after Kohiko itself starts,
+never on reload, so reloading the config doesn't relaunch every autostart
+program.
 
 ## Window rules
 
@@ -361,6 +366,37 @@ Each entry runs exactly the way `exec.<name>=` does (through `/bin/sh -c`,
 forced onto this session's `DISPLAY`), so anything you could put after
 `exec.terminal=` works here too. Leave it empty, or delete the line, to
 autostart nothing.
+
+### Autostart on a specific workspace
+
+`workspace<N>=` (N from 1 to `workspace.count`) is the same thing, except
+each program listed also gets pinned to workspace N once its window
+actually appears, instead of landing on whichever workspace happened to
+be focused when Kohiko itself started:
+
+```ini
+workspace1=zen-browser
+workspace2=discord telegram-desktop
+workspace3=steam
+```
+
+List a program under `workspace<N>=` instead of `auto_start_programs=`,
+not in addition to it - either one launches it, and `workspace<N>=` is
+just `auto_start_programs=` with a destination attached. Same
+space-separated, `/bin/sh -c`-through-DISPLAY syntax either way, and a
+program can only be pinned to one workspace at a time.
+
+Kohiko places it by matching the window's own `_NET_WM_PID` back to the
+process it just spawned for that line, walking up the process tree to
+find it (`/bin/sh -c` itself already forks one extra level before ever
+running your command, and a program with its own launcher script - e.g.
+Steam - adds more on top of that), which is also why this only ever
+affects a window that shows up within a minute or so of Kohiko
+starting - long enough to cover even a slow starter, but not so long
+that the same program opening some unrelated window an hour into the
+session gets redirected too. A `windowrule=workspace:N` for the same
+window (see [Window rules](#window-rules)) always wins over this if both
+apply, since that's a more specific, deliberate override.
 
 ## Keyboard layouts / languages
 

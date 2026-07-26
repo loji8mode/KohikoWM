@@ -1096,6 +1096,13 @@ void WindowManager::Manage(WindowID id)
 
     WindowRuleEffect rules = ResolveWindowRules(className, instanceName, window->Title());
 
+    // Whether a `workspace<N>=` autostart line (RunAutostart()) was
+    // the thing that launched this window's process in the first
+    // place - resolved here, before it's needed below, since (like
+    // the windowrule above) which workspace this window even competes
+    // for tiling room on depends on it.
+    int autostartWorkspace = ResolveWorkspaceAutostart(window->Pid());
+
     // A `windowrule=workspace:N` match ("open Telegram's media viewer
     // on its own dedicated workspace instead of cluttering whatever's
     // current" is the motivating example) has to land before the
@@ -1106,9 +1113,16 @@ void WindowManager::Manage(WindowID id)
     // on whichever workspace its parent actually lives on right now -
     // "the child always appears attached to its parent, never on the
     // wrong workspace" - rather than wherever happened to be current
-    // when it was mapped.
+    // when it was mapped. A `workspace<N>=` autostart placement slots
+    // in between those two: it's specific to this one launch (not
+    // just its class, the way a windowrule is), so it wins over
+    // parent-attachment too, but an explicit windowrule is still the
+    // more deliberate, more specific override and takes precedence
+    // over it.
     if (rules.forceWorkspace >= 1 && rules.forceWorkspace <= m_workspaces.Count())
         window->SetWorkspace(rules.forceWorkspace);
+    else if (autostartWorkspace >= 1 && autostartWorkspace <= m_workspaces.Count())
+        window->SetWorkspace(autostartWorkspace);
     else if (parent)
         window->SetWorkspace(parent->Workspace());
 
@@ -2288,6 +2302,69 @@ void WindowManager::RunAutostart()
     {
         Process::Spawn(program, m_connection.DisplayName());
     }
+
+    // `workspace<N>=` is autostart with a target workspace attached -
+    // e.g.
+    //
+    //   workspace1=zen-browser
+    //   workspace2=discord telegram-desktop
+    //   workspace3=steam
+    //
+    // Every program listed launches exactly like `auto_start_programs`
+    // above (space-separated, through `/bin/sh -c`, args and all) -
+    // the only difference is that whichever window(s) it opens land on
+    // workspace N once they actually show up, however long that takes
+    // (Steam and friends are never instant), instead of wherever
+    // happened to be focused at the moment Kohiko itself started.
+    //
+    // A window is only ever eligible for this for a bounded time after
+    // its process launches - long enough to cover a genuinely slow
+    // starter, not so long that the same process opening some unrelated
+    // window an hour into the session gets silently redirected too.
+    static constexpr auto kWorkspaceAutostartWindow = std::chrono::seconds(60);
+
+    std::chrono::steady_clock::time_point expiry =
+        std::chrono::steady_clock::now() + kWorkspaceAutostartWindow;
+
+    for (int workspaceId = 1; workspaceId <= m_workspaces.Count(); ++workspaceId)
+    {
+        std::string key = "workspace" + std::to_string(workspaceId);
+
+        for (const std::string& program : Utils::SplitWhitespace(m_config.GetString(key)))
+        {
+            pid_t pid = Process::Spawn(program, m_connection.DisplayName());
+
+            if (pid <= 0)
+                continue;
+
+            PendingWorkspaceAutostart pending;
+            pending.pid = static_cast<long>(pid);
+            pending.workspace = workspaceId;
+            pending.expiry = expiry;
+
+            m_pendingWorkspaceAutostarts.push_back(pending);
+        }
+    }
+}
+
+int WindowManager::ResolveWorkspaceAutostart(
+    long pid) const
+{
+    if (pid <= 0)
+        return 0;
+
+    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+
+    for (const PendingWorkspaceAutostart& pending : m_pendingWorkspaceAutostarts)
+    {
+        if (now >= pending.expiry)
+            continue;
+
+        if (pending.pid == pid || Process::IsDescendantOf(pid, static_cast<pid_t>(pending.pid)))
+            return pending.workspace;
+    }
+
+    return 0;
 }
 
 void WindowManager::ToggleLauncher()

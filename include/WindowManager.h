@@ -21,6 +21,7 @@
 
 #include <X11/Xlib.h>
 
+#include <chrono>
 #include <map>
 #include <memory>
 #include <string>
@@ -327,12 +328,24 @@ private:
     // on `reload` (setxkbmap is idempotent), unlike RunAutostart().
     void ApplyKeyboardLayouts();
 
-    // Launches every program listed in `auto_start_programs` exactly
-    // once, right after startup - see Initialize(). Deliberately never
-    // called from ReloadConfig(), or `kohikoctl reload` would relaunch
-    // every autostart program (a second Telegram, a second Discord, ...)
-    // every time someone reloads the config.
+    // Launches every program listed in `auto_start_programs`, plus
+    // every `workspace<N>=` line (N from 1 to workspace.count) - the
+    // same idea, except each program listed there also gets recorded
+    // in m_pendingWorkspaceAutostarts so Manage() can land its
+    // window(s) on workspace N once they actually show up. All of it
+    // runs exactly once, right after startup - see Initialize().
+    // Deliberately never called from ReloadConfig(), or `kohikoctl
+    // reload` would relaunch every autostart program (a second
+    // Telegram, a second Discord, ...) every time someone reloads the
+    // config.
     void RunAutostart();
+
+    // 0 if nothing pending matches `pid` (or it's <= 0); otherwise the
+    // workspace a `workspace<N>=` autostart line asked this window's
+    // process to land on - see RunAutostart() and Manage().
+    int ResolveWorkspaceAutostart(
+        long pid
+    ) const;
 
     // The area actually available for tiling on `monitor` - its own
     // WorkArea() (Geometry() minus the bar, for whichever monitor is
@@ -573,6 +586,27 @@ private:
     // Loaded from every `windowrule=` line in the config, refreshed by
     // both Initialize() and ReloadConfig() - see WindowRule.h.
     std::vector<WindowRule> m_windowRules;
+
+    // One program launched via `workspace<N>=` (see RunAutostart()).
+    // `pid` is whatever Process::Spawn() actually returned for it -
+    // the `/bin/sh -c` process's own pid, not the launched program's
+    // (see Process::Spawn()'s comment for why those two are normally
+    // different pids). Manage() matches a newly-mapped window's own
+    // _NET_WM_PID against it via Process::IsDescendantOf(), walking
+    // back up through that shell and any launcher script the program
+    // re-forks through on top of it. `expiry` bounds how long that
+    // match stays live, so a window the same long-running process
+    // opens much later in the session, well past anything "startup"
+    // actually means, is never still being redirected by a config line
+    // about launching it in the first place.
+    struct PendingWorkspaceAutostart
+    {
+        long pid = -1;
+        int workspace = 0;
+        std::chrono::steady_clock::time_point expiry;
+    };
+
+    std::vector<PendingWorkspaceAutostart> m_pendingWorkspaceAutostarts;
 
     // The invisible window WindowManager::Initialize() creates via
     // XConnection::InitializeEwmhSupport() to advertise EWMH support -
